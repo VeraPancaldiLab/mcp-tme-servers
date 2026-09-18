@@ -196,10 +196,19 @@ async def run_deconvolution(
                 "Running several methods (the default) is the point: agreement across methods "
                 "is what analyze_deconvolution uses to identify trustworthy cell subgroups "
                 "versus method-specific artifacts. CIBERSORTx (CBSX) is omitted from the default "
-                "set as it needs separate Docker credentials."
+                "set as it needs separate Docker credentials -- pass credentials_mail and "
+                "credentials_token (and include \"CBSX\" here) to run it."
             )
         ),
     ] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS"],
+    credentials_mail: Annotated[
+        str | None,
+        Field(description="CIBERSORTx account email, required (with credentials_token) to run the CBSX method. Get one at cibersortx.stanford.edu."),
+    ] = None,
+    credentials_token: Annotated[
+        str | None,
+        Field(description="CIBERSORTx API token, required (with credentials_mail) to run the CBSX method. Stored in this session's manifest.json for the R subprocess to read, but masked out of the session's exported reproducibility log."),
+    ] = None,
     signatures_select: Annotated[
         list[str] | None,
         Field(description="Signature matrix names to run (e.g. tissue- or platform-specific references); all bundled signatures are used if omitted."),
@@ -250,6 +259,8 @@ async def run_deconvolution(
             "doParallel": lit(do_parallel),
             "workers": lit(workers) if workers is not None else None,
             "return": lit(True),
+            "credentials.mail": lit(credentials_mail) if credentials_mail else None,
+            "credentials.token": lit(credentials_token) if credentials_token else None,
             "create_signature": lit(create_signature),
             "cells_extra": lit(cells_extra) if cells_extra else None,
             "file_name": lit(file_name) if file_name else None,

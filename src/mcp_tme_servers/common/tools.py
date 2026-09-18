@@ -22,6 +22,29 @@ READ_ANNOTATIONS = ToolAnnotations(read_only_hint=False, open_world_hint=False, 
 NETWORK_ANNOTATIONS = ToolAnnotations(read_only_hint=False, open_world_hint=True, destructive_hint=False)
 _SESSION_ANNOTATIONS = ToolAnnotations(read_only_hint=False, open_world_hint=False, destructive_hint=False)
 
+_SECRET_KEY_MARKERS = ("token", "password", "secret", "credential")
+
+
+def _redact_secrets(args: dict[str, dict]) -> dict[str, dict]:
+    """Copy of `args` with any credential-looking literal value masked out.
+
+    The session log (session_log.jsonl) is a durable, exportable artifact --
+    unlike the ephemeral run manifest.json a tool call needs to actually
+    execute, so any r_param whose name suggests a secret (token, password,
+    credential, ...) gets its literal value replaced before it's recorded.
+    """
+    redacted = {}
+    for key, spec in args.items():
+        if (
+            isinstance(spec, dict)
+            and spec.get("__type__") == "literal"
+            and any(marker in key.lower() for marker in _SECRET_KEY_MARKERS)
+        ):
+            redacted[key] = {"__type__": "literal", "value": "***REDACTED***"}
+        else:
+            redacted[key] = spec
+    return redacted
+
 
 class RunResult(BaseModel):
     """Generic result of one R analysis run.
@@ -129,11 +152,11 @@ def make_run(*, runs_root: Path) -> Callable:
             )
         except RToolError as e:
             if session is not None:
-                session.record_step(tool=tool_name, args=args, status="failed", run_dir=output_dir, error=str(e))
+                session.record_step(tool=tool_name, args=_redact_secrets(args), status="failed", run_dir=output_dir, error=str(e))
             raise ToolError(f"{e}\n\n--- R log tail ---\n{e.log_tail}") from e
 
         if session is not None:
-            session.record_step(tool=tool_name, args=args, status="success", run_dir=result["run_dir"])
+            session.record_step(tool=tool_name, args=_redact_secrets(args), status="success", run_dir=result["run_dir"])
 
         # jsonlite serializes an empty R named list as `[]`, not `{}` -- normalize
         # back to a dict here rather than trying to fight that on the R side.

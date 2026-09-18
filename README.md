@@ -12,8 +12,7 @@ packages so an LLM agent can call them directly:
 | RaCInG | Cell-cell interaction network reconstruction | [RaCInG](https://github.com/VeraPancaldiLab/RaCInG_package) |
 
 All four servers use MCP over stdio and are distributed together as
-`mcp-tme-servers`, following the same one-repo/one-package/multiple-servers
-pattern as [mcp-biomodelling-servers](https://github.com/marcorusc/mcp-biomodelling-servers).
+`mcp-tme-servers`.
 
 ## Requirements
 
