@@ -1,0 +1,28 @@
+[project]
+name = "mcp-tme-servers"
+version = "0.1.0"
+description = "MCP servers for tumor-microenvironment analysis of bulk RNAseq: cell-type deconvolution (multideconv), leakage-free ML/survival modeling (pipeML), TF-activity-based TME characterization (CellTFusion), and cell-cell interaction network reconstruction (RaCInG)."
+authors = [
+    { name = "mhurtado13", email = "marcelo.hurt137@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=2.1,<3",
+    "pydantic>=2",
+]
+
+[project.scripts]
+mcp-multideconv-server = "mcp_tme_servers.multideconv.server:main"
+mcp-pipeml-server = "mcp_tme_servers.pipeml.server:main"
+mcp-celltfusion-server = "mcp_tme_servers.celltfusion.server:main"
+mcp-racing-server = "mcp_tme_servers.racing.server:main"
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "anyio",
+]
