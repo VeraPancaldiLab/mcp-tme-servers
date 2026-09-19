@@ -1,27 +1,35 @@
 # mcp-tme-servers
 
-Four [Model Context Protocol](https://modelcontextprotocol.io/) servers for
+Five [Model Context Protocol](https://modelcontextprotocol.io/) servers for
 tumor-microenvironment (TME) analysis of bulk RNAseq, wrapping four R
-packages so an LLM agent can call them directly:
+packages plus one general-purpose R toolkit so an LLM agent can call them
+directly:
 
-| Server | Analysis role | Upstream R package |
+| Server | Analysis role | Upstream R code |
 |---|---|---|
-| multideconv | Bulk RNAseq cell-type deconvolution, harmonized across methods | [multideconv](https://github.com/VeraPancaldiLab/multideconv) |
-| pipeML | Leakage-free classification/survival model training | [pipeML](https://github.com/VeraPancaldiLab/pipeML) |
-| CellTFusion | TF-activity-based tumor-microenvironment state characterization | [CellTFusion](https://github.com/VeraPancaldiLab/CellTFusion) |
-| RaCInG | Cell-cell interaction network reconstruction | [RaCInG](https://github.com/VeraPancaldiLab/RaCInG_package) |
+| multideconv | Bulk RNAseq cell-type deconvolution, harmonized across methods | [multideconv](https://github.com/VeraPancaldiLab/multideconv) (package) |
+| pipeML | Leakage-free classification/survival model training | [pipeML](https://github.com/VeraPancaldiLab/pipeML) (package) |
+| CellTFusion | TF-activity-based tumor-microenvironment state characterization | [CellTFusion](https://github.com/VeraPancaldiLab/CellTFusion) (package) |
+| RaCInG | Cell-cell interaction network reconstruction | [RaCInG](https://github.com/VeraPancaldiLab/RaCInG_package) (package) |
+| Bioinfo-tools | General-purpose bulk RNAseq analysis utilities (TF/pathway activity, DEG, survival, normalization, PCA, trait-association testing) | [Bioinfo-tools](https://github.com/mhurtado13/Bioinfo-tools) (script, `functions.r`) |
 
-All four servers use MCP over stdio and are distributed together as
+All five servers use MCP over stdio and are distributed together as
 `mcp-tme-servers`.
 
 ## Requirements
 
 - Python >= 3.12.
 - MCP Python SDK 2.x, installed automatically with this package.
-- R with the four upstream packages (`multideconv`, `pipeML`, `CellTFusion`,
-  `RaCInG`) installed in the system R library that `Rscript` (must be on
-  `PATH`) resolves to -- these are not pip/CRAN packages and aren't installed
-  automatically; see each package's own repository for install instructions.
+- R with `multideconv`, `pipeML`, `CellTFusion`, and `RaCInG` installed in the
+  system R library that `Rscript` (must be on `PATH`) resolves to -- these
+  are not pip/CRAN packages and aren't installed automatically; see each
+  package's own repository for install instructions.
+- A checkout of [Bioinfo-tools](https://github.com/mhurtado13/Bioinfo-tools)
+  (its `functions.r`, not a package, so `library()` won't find it) with its
+  own R dependencies (decoupleR, GSVA, edgeR, limma, survival, survminer,
+  gridExtra, WGCNA, ADImpute, sva, ggpubr, ggstatsplot, ...) installed in the
+  same R library. Defaults to `~/Documents/Bioinfo-tools/functions.r`;
+  override with `BIOINFOTOOLS_SCRIPT` if checked out elsewhere.
 
 ## How it works
 
@@ -29,8 +37,11 @@ Each server's tools are thin Python wrappers (`src/mcp_tme_servers/<server>/serv
 around one shared subprocess bridge (`src/mcp_tme_servers/common/r_bridge.py`)
 that shells out to a single generic R dispatcher
 (`src/mcp_tme_servers/common/r/run_tool.R`) -- one dispatcher, one marshaling
-contract, reused by all four servers rather than duplicated per server. See
-`common/r_bridge.py` docstrings for the manifest format.
+contract, reused by all five servers rather than duplicated per server. See
+`common/r_bridge.py` docstrings for the manifest format. Four servers run it
+in "package" mode (`library()` + `asNamespace()` lookup); Bioinfo-tools runs
+it in "source" mode instead (`source()`s `functions.r` fresh into its own
+environment per call), since it isn't an installed package.
 
 Runtime output (result files, plots, session logs) defaults to
 `~/.mcp-tme-servers/<server>/runs/`, one directory per server so they never
@@ -51,6 +62,7 @@ uv run mcp-multideconv-server
 uv run mcp-pipeml-server
 uv run mcp-celltfusion-server
 uv run mcp-racing-server
+uv run mcp-bioinfotools-server
 ```
 
 ### Register with Claude Code
@@ -60,6 +72,7 @@ claude mcp add multideconv-server --scope user -- uv --directory /home/marcelo.h
 claude mcp add pipeML-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-pipeml-server
 claude mcp add CellTFusion-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-celltfusion-server
 claude mcp add RaCInG-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-racing-server
+claude mcp add Bioinfo-tools-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-bioinfotools-server
 ```
 
 ## Configure an MCP client generically
@@ -67,10 +80,11 @@ claude mcp add RaCInG-server --scope user -- uv --directory /home/marcelo.hurtad
 ```jsonc
 {
   "servers": {
-    "multideconv": { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-multideconv-server"] },
-    "pipeml":      { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-pipeml-server"] },
-    "celltfusion": { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-celltfusion-server"] },
-    "racing":      { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-racing-server"] }
+    "multideconv":   { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-multideconv-server"] },
+    "pipeml":        { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-pipeml-server"] },
+    "celltfusion":   { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-celltfusion-server"] },
+    "racing":        { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-racing-server"] },
+    "bioinfotools":  { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-bioinfotools-server"] }
   }
 }
 ```
@@ -177,7 +191,45 @@ even though they call it internally when given raw `counts`. Workaround
 (documented in both tools): call `prepare_racing_inputs` first and pass its
 result via `input_data_rds`.
 
-## Shared upstream issue (all four servers)
+### Bioinfo-tools (14 tools: 13 analysis + session tools*)
+
+| Tool | R function |
+|---|---|
+| `compute_tf_activity` | `compute.TFs.activity` |
+| `compute_pathway_activity` | `compute.pathway.activity` |
+| `run_deg_analysis` | `run_deg_analysis` |
+| `compute_survival_analysis` | `compute.survival.analysis` |
+| `compute_normalization` | `compute.normalization` |
+| `compute_batch_correction` | `compute.batch.correction` |
+| `compute_pca_analysis` | `compute.pca.analysis` |
+| `compute_correlation` | `compute.correlation` |
+| `scores_pearson_test` | `scores.pearson.test` |
+| `scores_spearman_test` | `scores.spearman.test` |
+| `scores_kendall_test` | `scores.kendall.test` |
+| `scores_lm_test` | `scores.lm.test` |
+| `scores_fisher_test_continuous` | `scores.fisher.test.continuous` |
+| `scores_stat_analysis` | `scores.stat.analysis.continuous` |
+
+\* 11 analysis tools plus the 3 session tools = 14; `scores_stat_analysis`
+above is itself a dispatcher over the five `scores_*_test` tools, so 13
+distinct analyses are exposed as 14 tool entry points.
+
+Standalone utilities, not one fixed pipeline -- reach for whichever function
+fits the current step. `compute_normalization` typically runs first on raw
+counts, since `compute_tf_activity`/`compute_pathway_activity` expect
+already-normalized expression; results from any of these (or from
+multideconv-server/CellTFusion-server/RaCInG-server) are typical inputs to
+`compute_survival_analysis` or the `scores_*`/`scores_stat_analysis`
+trait-association tools. Export requires at least one analysis tool to have
+completed.
+
+Unlike the other four servers, this one runs `run_tool.R` in "source" mode
+(see [How it works](#how-it-works)): it needs a local checkout of
+[Bioinfo-tools](https://github.com/mhurtado13/Bioinfo-tools) rather than an
+installed R package -- see [Requirements](#requirements) for the
+`BIOINFOTOOLS_SCRIPT` override.
+
+## Shared upstream issue (all four package servers)
 
 `CellTFusion()` and RaCInG's `prepare_input_files()`/internal helpers call
 `multideconv::compute.deconvolution()` (and related functions) without an
@@ -198,5 +250,11 @@ actually running -- worth fixing upstream via each package's
   metric AUROC, leave-one-dataset-out CV by cohort."
 - "Build the RaCInG inputs from the same counts and get me direct and wedge
   communication features."
+- "Normalize `~/data/luad_counts.csv` to log-TPM, then compute TF activity
+  and pathway activity on the result."
+- "Test whether any TF activity column correlates with tumor purity in
+  coldata.csv -- try Spearman first."
+- "Screen the harmonized deconvolution features for anything prognostic in
+  the LUAD_batch1 cohort's survival data."
 - "Export the LUAD_batch1 session's results so I can attach the
   reproducibility log to the methods section."

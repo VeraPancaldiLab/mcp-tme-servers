@@ -115,7 +115,8 @@ def make_run(*, runs_root: Path) -> Callable:
 
     async def _run(
         *,
-        package: str,
+        package: str | None = None,
+        source: str | None = None,
         function: str,
         args: dict[str, dict],
         tool_name: str,
@@ -142,6 +143,7 @@ def make_run(*, runs_root: Path) -> Callable:
         try:
             result = await run_r_function(
                 package=package,
+                source=source,
                 function=function,
                 args=args,
                 tool_name=tool_name,

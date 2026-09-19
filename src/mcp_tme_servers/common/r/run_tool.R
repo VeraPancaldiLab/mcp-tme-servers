@@ -16,6 +16,11 @@
 #     }
 #   }
 #
+# Exactly one of "package" (an installed R package, function looked up via
+# asNamespace()) or "source" (a standalone .r script, source()'d into its own
+# environment -- for Bioinfo-tools, which isn't an installed package) must be
+# given.
+#
 # Writes workdir/result.rds (full return value), workdir/result_summary.json,
 # and any CSVs for tabular elements of the result. The function itself is run
 # with workdir as the working directory, so its own relative "Results/..."
@@ -65,6 +70,14 @@ resolve_arg <- function(spec) {
     return(col)
   }
 
+  if (type == "csv_list") {
+    row_names <- spec$row_names
+    if (is.null(row_names)) row_names <- NULL else row_names <- as.integer(row_names)
+    df <- utils::read.csv(spec$path, row.names = row_names, check.names = FALSE)
+    if (isTRUE(spec$as_matrix)) df <- as.matrix(df)
+    return(list(df))
+  }
+
   if (type == "rds") {
     return(readRDS(spec$path))
   }
@@ -82,15 +95,31 @@ for (nm in names(raw_args)) {
   call_args[[nm]] <- resolve_arg(raw_args[[nm]])
 }
 
-# These four packages call into each other's exported functions without an
-# explicit `pkg::fun()` prefix (e.g. CellTFusion() calls
-# multideconv::compute.deconvolution() as a bare compute.deconvolution()), which
-# only resolves if that sister package is attached, not merely installed. Attach
-# all four regardless of which one is this server's target package.
-for (sister_pkg in c("multideconv", "pipeML", "CellTFusion", "RaCInG")) {
-  suppressMessages(library(sister_pkg, character.only = TRUE))
+if (!is.null(manifest$source)) {
+  # Bioinfo-tools isn't an installed package -- source() its script into its
+  # own environment and look the function up there. Its functions use %>%
+  # without an explicit library(magrittr)/library(dplyr) of their own (every
+  # other call is already `pkg::fun()`-qualified), so attach magrittr for that
+  # operator. Its functions also expect a "Results/" dir under the working
+  # directory to already exist (same convention documented in its own
+  # README/usage example), which the other four packages' functions create
+  # for themselves internally.
+  suppressMessages(library(magrittr))
+  dir.create(file.path(workdir, "Results"), recursive = TRUE, showWarnings = FALSE)
+  fn_env <- new.env(parent = globalenv())
+  sys.source(manifest$source, envir = fn_env)
+  fun <- get(manifest$`function`, mode = "function", envir = fn_env)
+} else {
+  # These four packages call into each other's exported functions without an
+  # explicit `pkg::fun()` prefix (e.g. CellTFusion() calls
+  # multideconv::compute.deconvolution() as a bare compute.deconvolution()), which
+  # only resolves if that sister package is attached, not merely installed. Attach
+  # all four regardless of which one is this server's target package.
+  for (sister_pkg in c("multideconv", "pipeML", "CellTFusion", "RaCInG")) {
+    suppressMessages(library(sister_pkg, character.only = TRUE))
+  }
+  fun <- get(manifest$`function`, envir = asNamespace(manifest$package))
 }
-fun <- get(manifest$`function`, envir = asNamespace(manifest$package))
 
 is_error <- FALSE
 error_msg <- NULL

@@ -50,6 +50,17 @@ def csv_column_arg(path: str, column: str, row_names: int | None = 1) -> dict:
     return {"__type__": "csv_column", "path": _abs(path), "column": column, "row_names": row_names}
 
 
+def csv_list_arg(path: str, row_names: int | None = 1, as_matrix: bool = False) -> dict:
+    """A CSV file read as above, then wrapped in a one-element R list: list(df).
+
+    Some Bioinfo-tools functions (the scores.*.test() family) index their `scores`
+    argument as scores[[1]] rather than accepting a bare matrix/data.frame directly
+    (unlike scores.stat.analysis.continuous(), which self-wraps). This produces the
+    shape those functions expect from a plain samples x features CSV.
+    """
+    return {"__type__": "csv_list", "path": _abs(path), "row_names": row_names, "as_matrix": as_matrix}
+
+
 def rds_arg(path: str) -> dict:
     """A .rds file, read back with readRDS() (preserves full R object structure)."""
     return {"__type__": "rds", "path": _abs(path)}
@@ -72,7 +83,8 @@ def args_from(**kwargs: Any) -> dict[str, dict]:
 
 async def run_r_function(
     *,
-    package: str,
+    package: str | None = None,
+    source: str | None = None,
     function: str,
     args: dict[str, dict],
     tool_name: str,
@@ -82,6 +94,11 @@ async def run_r_function(
     output_dir: str | None = None,
 ) -> dict:
     """Run one R package function via run_tool.R and return its parsed result dict.
+
+    Exactly one of `package` (an installed R package, looked up via
+    asNamespace()) or `source` (a standalone .r script, source()'d into its own
+    environment -- for Bioinfo-tools, which isn't an installed package) must be
+    given.
 
     Raises RToolError on a non-zero exit, a timeout, or an R-side error caught
     by run_tool.R's tryCatch (the R error message becomes the exception message).
@@ -98,6 +115,9 @@ async def run_r_function(
     overwritten by each subsequent call, so a downstream tool chaining off an
     earlier result.rds must run before the next call reuses that directory.
     """
+    if (package is None) == (source is None):
+        raise ValueError("run_r_function: exactly one of package or source must be given")
+
     if output_dir is not None:
         workdir = Path(output_dir).expanduser().resolve()
         workdir.mkdir(parents=True, exist_ok=True)
@@ -107,7 +127,7 @@ async def run_r_function(
         workdir = runs_root / run_id
         workdir.mkdir(parents=True, exist_ok=True)
 
-    manifest = {"package": package, "function": function, "workdir": str(workdir), "args": args}
+    manifest = {"package": package, "source": source, "function": function, "workdir": str(workdir), "args": args}
     manifest_path = workdir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
 

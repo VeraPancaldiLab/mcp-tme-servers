@@ -1,7 +1,7 @@
 [project]
 name = "mcp-tme-servers"
 version = "0.1.0"
-description = "MCP servers for tumor-microenvironment analysis of bulk RNAseq: cell-type deconvolution (multideconv), leakage-free ML/survival modeling (pipeML), TF-activity-based TME characterization (CellTFusion), and cell-cell interaction network reconstruction (RaCInG)."
+description = "MCP servers for tumor-microenvironment analysis of bulk RNAseq: cell-type deconvolution (multideconv), leakage-free ML/survival modeling (pipeML), TF-activity-based TME characterization (CellTFusion), cell-cell interaction network reconstruction (RaCInG), and general-purpose analysis utilities (Bioinfo-tools)."
 authors = [
     { name = "mhurtado13", email = "marcelo.hurt137@gmail.com" }
 ]
@@ -16,6 +16,7 @@ mcp-multideconv-server = "mcp_tme_servers.multideconv.server:main"
 mcp-pipeml-server = "mcp_tme_servers.pipeml.server:main"
 mcp-celltfusion-server = "mcp_tme_servers.celltfusion.server:main"
 mcp-racing-server = "mcp_tme_servers.racing.server:main"
+mcp-bioinfotools-server = "mcp_tme_servers.bioinfotools.server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]
