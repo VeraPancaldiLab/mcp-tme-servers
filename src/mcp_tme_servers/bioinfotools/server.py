@@ -1,25 +1,30 @@
 """Bioinfo-tools-server: MCP tools for general-purpose bulk RNAseq analysis
 
 Wraps every exported function in Bioinfo-tools' functions.r: TF-activity inference
-(VIPER, from expression or from a DEG signature with permutation p-values),
+(from gene expression (logTPM) or from a DEG signature with permutation p-values),
 decoupleR-scored pathway activity, edgeR/limma-voom differential expression with its
 volcano plot, ORA/GSEA enrichment (GO/KEGG/REACTOME/PROGENy/Hallmark), Kaplan-Meier
 survival analysis, TPM/z-score normalization, ComBat-seq batch correction, PCA, and
 trait-association testing against both a continuous variable (Pearson, Spearman,
 Fisher's exact) and a categorical one (t-test, Wilcoxon, ANOVA, Kruskal-Wallis).
 
-IMPORTANT -- "footprint" methods: three of this server's activity-inference resources
-are footprint-based (they infer a regulator's activity from its curated targets'/
-responsive genes' expression pattern, not from the regulator's own expression):
-CollecTRI and Dorothea for transcription-factor activity (compute_tf_activity,
+IMPORTANT -- "footprint" methods: four of this server's activity-inference resources
+are footprint-based (they infer a regulator's activity from its targets'/responsive
+genes' expression pattern via a decoupleR statistic -- default `statistic='consensus'`,
+an ensemble of MLM/ULM/normalized WSUM; VIPER is just one of several selectable
+statistics, not the default -- rather than from the regulator's own expression):
+CollecTRI, Dorothea, and ARACNE for transcription-factor activity (compute_tf_activity,
 compute_tf_activity_deg -- via `tf_collection`), and PROGENy for pathway activity
-(compute_pathway_activity's default `pathway_source`). Everything else in this server
-is a different kind of resource: ARACNE (`tf_collection="ARACNE"`) is a data-driven,
-per-cohort regulatory network rather than a curated footprint; KEGG/REACTOME/Hallmark
-(`pathway_source`) are unsigned MSigDB gene set collections scored the same
-decoupleR way but without PROGENy's curated, signed pathway-responsive weights; and
-compute_enrichment's GO/KEGG/REACTOME/PROGENy/Hallmark databases are plain
-ORA/GSEA gene-set testing, not footprint inference at all.
+(compute_pathway_activity's default `pathway_source`). CollecTRI, Dorothea, and PROGENy
+draw on curated, literature-derived prior-knowledge networks (PKN); ARACNE
+(`tf_collection="ARACNE"`) differs only in where its network comes from -- a
+data-driven gene regulatory network (GRN) inferred per-cohort from the input
+expression itself -- not in whether it counts as footprint-based (it does). The
+genuine non-footprint alternatives are KEGG/REACTOME/Hallmark (`pathway_source`),
+unsigned MSigDB gene set collections scored the same decoupleR way but without
+PROGENy's curated, signed pathway-responsive weights, and compute_enrichment's
+GO/KEGG/REACTOME/PROGENy/Hallmark databases, which are plain ORA/GSEA gene-set
+testing, not footprint inference at all.
 
 Unlike the other three servers in this package, Bioinfo-tools is not an installed R
 package (no DESCRIPTION/NAMESPACE) -- it's a single script, functions.r, meant to be
@@ -70,8 +75,10 @@ mcp = MCPServer(
     "Bioinfo-tools-server",
     instructions=(
         "General-purpose R functions for bulk RNAseq analysis, gathered in a single functions.r "
-        "file: transcription factor activity from expression (VIPER via CollecTRI/Dorothea/ "
-        "ARACNE, compute_tf_activity) or from a DEG signature with permutation p-values "
+        "file: transcription factor activity from expression (decoupleR-scored via "
+        "CollecTRI/Dorothea/ARACNE, compute_tf_activity, default statistic 'consensus' -- not "
+        "VIPER, which is just one of several decoupleR statistics available) or from a DEG "
+        "signature with permutation p-values "
         "(compute_tf_activity_deg); decoupleR-scored pathway activity (PROGENy/KEGG/REACTOME/ "
         "Hallmark, compute_pathway_activity); edgeR/limma-voom differential expression "
         "(run_deg_analysis) with its volcano plot (compute_volcano_plot); ORA/GSEA enrichment "
@@ -83,13 +90,18 @@ mcp = MCPServer(
         "the individual scores_*_test tools) or a categorical one (t-test, Wilcoxon, ANOVA, "
         "Kruskal-Wallis -- scores_stat_analysis_categorical or the individual scores_*_test "
         "tools). "
-        "IMPORTANT: of these, CollecTRI and Dorothea (compute_tf_activity/compute_tf_activity_deg's "
-        "tf_collection) and PROGENy (compute_pathway_activity's default pathway_source) are the "
-        "three footprint-based databases in this server -- they score a regulator's activity "
-        "from its curated targets'/responsive genes' expression, not the regulator's own "
-        "expression. ARACNE and the KEGG/REACTOME/Hallmark gene set collections are the "
-        "non-footprint alternatives (a data-driven per-cohort network, and unsigned MSigDB gene "
-        "sets, respectively). "
+        "IMPORTANT: CollecTRI, Dorothea, and ARACNE (compute_tf_activity/compute_tf_activity_deg's "
+        "tf_collection) and PROGENy (compute_pathway_activity's default pathway_source) are all "
+        "footprint-based -- they score a regulator's activity from its targets'/responsive genes' "
+        "expression, not the regulator's own expression, via a decoupleR statistic (default "
+        "'consensus', an ensemble of MLM/ULM/normalized WSUM -- VIPER is only one of several "
+        "selectable statistics, not the default). CollecTRI and Dorothea are curated "
+        "prior-knowledge networks (PKN) fetched from OmnipathR; ARACNE differs only in where its "
+        "network comes from -- a data-driven gene regulatory network (GRN) inferred per-cohort "
+        "from the input expression itself, rather than a curated PKN -- it is scored the same "
+        "footprint way once that network exists. The KEGG/REACTOME/Hallmark gene set collections "
+        "are the genuine non-footprint alternative for pathway activity (unsigned MSigDB gene "
+        "sets, scored the same decoupleR way but without PROGENy's curated, signed weights). "
         "These are standalone utilities rather than one fixed pipeline -- reach for whichever "
         "function fits the current step. Common chains: run compute_normalization on raw counts "
         "before compute_tf_activity/compute_pathway_activity (both expect normalized "
@@ -202,13 +214,16 @@ TfCollectionParam = Annotated[
     Literal["CollecTRI", "Dorothea", "ARACNE"],
     Field(
         description=(
-            "Source of the TF-target regulon network. 'CollecTRI' (default) and 'Dorothea' are "
-            "prebuilt, literature-curated, FOOTPRINT-based collections fetched from OmnipathR "
-            "(and cached to Results/TF_target_collection.csv under run_dir for reuse within the "
-            "same output_dir) -- generic, not tissue/cancer-specific; use 'Dorothea' with "
-            "confidence to restrict to its highest-confidence regulons. 'ARACNE' instead "
-            "correlates each TF against its targets in a user-supplied, data-driven network "
-            "(NOT footprint-based) -- pick this for a cancer-type/cohort-specific regulatory "
+            "Source of the TF-target regulon network -- all three are scored the same "
+            "FOOTPRINT way (a decoupleR statistic over each TF's targets, default 'consensus'; "
+            "VIPER is just one selectable statistic among several, not the default or the only "
+            "one). 'CollecTRI' (default) and 'Dorothea' are prebuilt, literature-curated "
+            "prior-knowledge networks (PKN) fetched from OmnipathR (and cached to "
+            "Results/TF_target_collection.csv under run_dir for reuse within the same "
+            "output_dir) -- generic, not tissue/cancer-specific; use 'Dorothea' with confidence "
+            "to restrict to its highest-confidence regulons. 'ARACNE' instead correlates each TF "
+            "against its targets in a user-supplied, data-driven gene regulatory network (GRN) "
+            "rather than a curated PKN -- pick this for a cancer-type/cohort-specific regulatory "
             "network; requires aracne_network to point at a 3-column network.txt file "
             "(Regulator, Target, mutual information, e.g. from ARACNe-AP)."
         )
@@ -270,16 +285,20 @@ async def compute_tf_activity(
     cores: Annotated[int, Field(ge=1, description="Reserved for parallelizing VIPER inference; not currently used by the underlying R function.")] = 3,
     file_name: Annotated[str | None, Field(description="File name suffix for the TF activity matrix CSV written to run_dir/Results.")] = None,
 ) -> RunResult:
-    """Infer transcription factor activity from expression via VIPER
+    """Infer transcription factor activity from expression via decoupleR
     (Bioinfo-tools::compute.TFs.activity).
 
     WHAT: infers each TF's regulatory activity (not its own expression) from how coordinately
-    up/down its known target genes move in each sample, using the VIPER algorithm against a
-    TF-target regulon network. Higher activity means the TF's targets show more coordinated
-    up-regulation in that sample -- a functional readout of regulatory state that raw TF gene
-    expression alone doesn't capture. tf_collection='CollecTRI'/'Dorothea' are FOOTPRINT-based
-    (curated, literature-derived regulons); 'ARACNE' is a data-driven, cohort-specific network
-    instead -- see this server's own instructions for the full footprint-method rundown.
+    up/down its known target genes move in each sample, using a decoupleR statistic (default
+    'consensus', an ensemble of MLM/ULM/normalized WSUM -- VIPER is just one of several
+    selectable statistics via the statistic parameter, not the default) against a TF-target
+    regulon network. Higher activity means the TF's targets show more coordinated up-regulation
+    in that sample -- a functional readout of regulatory state that raw TF gene expression alone
+    doesn't capture. All three tf_collection options are FOOTPRINT-based (scored this same way);
+    'CollecTRI'/'Dorothea' draw on curated, literature-derived prior-knowledge networks (PKN),
+    while 'ARACNE' instead uses a data-driven gene regulatory network (GRN) inferred per-cohort
+    from the input expression -- see this server's own instructions for the full footprint-method
+    rundown.
 
     WHEN: run on already-normalized, log-scale expression (e.g. compute_normalization's output)
     -- not raw counts. The resulting samples x TFs matrix is a typical input to
@@ -586,6 +605,30 @@ async def compute_volcano_plot(
     pval: Annotated[float, Field(ge=0, le=1, description="Adjusted p-value cutoff marked on the plot.")] = 0.05,
     logfc: Annotated[float, Field(ge=0, description="Absolute log2 fold-change cutoff marked on the plot.")] = 1.0,
     title: Annotated[str | None, Field(description="Plot title. Defaults to 'Volcano plot' if omitted.")] = None,
+    xlim: Annotated[
+        list[float] | None,
+        Field(
+            description=(
+                "[min, max] x-axis (log2 fold-change) display range. If omitted, EnhancedVolcano's "
+                "own default is used (data range padded by a fixed +/-1.5), which can dwarf small "
+                "effect sizes and compress every point near zero -- set this explicitly (e.g. "
+                "[-0.2, 0.2]) to zoom into the actual spread of logFC in deg_csv."
+            ),
+            min_length=2,
+            max_length=2,
+        ),
+    ] = None,
+    ylim: Annotated[
+        list[float] | None,
+        Field(
+            description=(
+                "[min, max] y-axis (-log10 adjusted p-value) display range. If omitted, "
+                "EnhancedVolcano's own default is used (0 to the tallest point + 5)."
+            ),
+            min_length=2,
+            max_length=2,
+        ),
+    ] = None,
     file_name: Annotated[str | None, Field(description="File name suffix used when saving the plot as a PDF to run_dir/Results.")] = None,
 ) -> RunResult:
     """Volcano plot for a differential expression result (Bioinfo-tools::compute.volcano.plot).
@@ -597,7 +640,9 @@ async def compute_volcano_plot(
 
     WHEN: use directly when you already have a DEG table from elsewhere, want a different
     pval/logfc marking than run_deg_analysis's defaults without rerunning the model, or want the
-    plot saved separately from the DEG call itself.
+    plot saved separately from the DEG call itself. Pass xlim/ylim to zoom the axes -- useful for
+    small targeted panels (e.g. a NanoString gene set) where logFC values never approach
+    EnhancedVolcano's default +/-1.5 padding, leaving every point squeezed near the origin.
 
     Returns the ggplot object (also saved as a PDF under run_dir/Results).
     """
@@ -607,6 +652,8 @@ async def compute_volcano_plot(
             "pval": lit(pval),
             "logFC": lit(logfc),
             "title": lit(title) if title else None,
+            "xlim": lit(xlim) if xlim else None,
+            "ylim": lit(ylim) if ylim else None,
             "return": lit(True),
             "file.name": lit(file_name) if file_name else None,
         }

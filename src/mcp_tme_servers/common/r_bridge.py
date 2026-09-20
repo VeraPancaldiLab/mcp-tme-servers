@@ -73,6 +73,15 @@ def rds_arg(path: str) -> dict:
     return {"__type__": "rds", "path": _abs(path)}
 
 
+def rds_element_arg(path: str, element: str) -> dict:
+    """One named element of a .rds file's top-level list, e.g. readRDS(path)[["Model"]] --
+    for a downstream R function (like pipeML's compute_prediction/compute_shap_values) that
+    expects the inner trained-model object itself, not the wrapping result list a tool's own
+    result.rds holds (Model, Features, CV_Results, ...).
+    """
+    return {"__type__": "rds_element", "path": _abs(path), "element": element}
+
+
 def path_arg(path: str) -> dict:
     """A raw file path, absolutized against the caller's cwd, passed through as a
     literal string -- for an argument the R function reads from disk itself (e.g. a
@@ -87,9 +96,38 @@ def r_function_arg(name: str) -> dict:
     return {"__type__": "r_function", "value": name}
 
 
+def named_r_function_arg(name: str, package: str) -> dict:
+    """A function exported by an installed package (not base R), looked up by name --
+    e.g. multideconv::prepare_multideconv_folds, for a tool parameter (like pipeML's
+    fold_construction_fun) that expects an actual R function object rather than data.
+
+    Since an arbitrary R closure can't cross this JSON-manifest bridge, callers should
+    restrict the Python-side parameter to a closed set of known, pre-registered function
+    names (e.g. a Literal[...] type) rather than accepting an arbitrary string -- this
+    builder only carries the name+package through; it doesn't validate that the name is
+    safe to expose.
+    """
+    return {"__type__": "r_named_function", "value": name, "package": package}
+
+
 def lit(value: Any) -> dict:
     """A literal scalar, string, bool, number, or flat list of those."""
     return {"__type__": "literal", "value": value}
+
+
+def named_args_arg(value: dict) -> dict:
+    """A named list of heterogeneously-typed arguments (e.g. {"corr": 0.7, "cells_extra":
+    ["TypeA"]}) meant to be spliced into another R function call via do.call() -- e.g.
+    pipeML's fold_construction_args_fixed/fold_construction_args_tunable, which are handed
+    to fold_construction_fun as `do.call(fold_construction_fun, c(list(...), these_args))`.
+
+    Unlike lit(), which -- for a flat, all-scalar dict -- flattens it into a plain R named
+    vector (fine when spliced with c(), but wrong for a dict with a vector-valued entry
+    like cells_extra, which would stay a nested list instead of becoming a character
+    vector), this always resolves to a proper R list() at the top level, normalizing each
+    entry independently.
+    """
+    return {"__type__": "named_args", "value": value}
 
 
 def args_from(**kwargs: Any) -> dict[str, dict]:

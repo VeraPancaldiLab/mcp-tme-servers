@@ -43,6 +43,77 @@ async def test_train_ml_model(client: Client) -> None:
 
 
 @pytest.mark.anyio
+async def test_predict_ml_model(client: Client) -> None:
+    training = await client.call_tool(
+        "train_ml_model",
+        {
+            "features_train_csv": str(DATA / "ml_features_train.csv"),
+            "task_type": "classification",
+            "target_csv": str(DATA / "ml_coldata_train.csv"),
+            "target_column": "target",
+            "trait_positive": "1",
+            "metric": "AUROC",
+            "k_folds": 3,
+            "n_rep": 1,
+        },
+    )
+    assert not training.is_error
+    model_rds = str(Path(training.structured_content["run_dir"]) / "result.rds")
+
+    result = await client.call_tool(
+        "predict_ml_model",
+        {
+            "model_rds": model_rds,
+            "test_data_csv": str(DATA / "ml_features_test.csv"),
+            "task_type": "classification",
+            "target_csv": str(DATA / "ml_coldata.csv"),
+            "target_column": "target",
+            "trait_positive": "1",
+        },
+    )
+    assert not result.is_error
+    sc = result.structured_content
+    assert "AUC" in sc["summary"]["names"]
+    assert "AUC" in sc["field_glossary"]
+
+
+@pytest.mark.anyio
+async def test_compute_shap_values(client: Client) -> None:
+    training = await client.call_tool(
+        "train_ml_model",
+        {
+            "features_train_csv": str(DATA / "ml_features_train.csv"),
+            "task_type": "classification",
+            "target_csv": str(DATA / "ml_coldata_train.csv"),
+            "target_column": "target",
+            "trait_positive": "1",
+            "metric": "AUROC",
+            "k_folds": 3,
+            "n_rep": 1,
+        },
+    )
+    assert not training.is_error
+    model_rds = str(Path(training.structured_content["run_dir"]) / "result.rds")
+
+    # compute_shap_values expects features + target in one CSV, unlike train_ml_model/
+    # predict_ml_model which take them as separate CSVs.
+    result = await client.call_tool(
+        "compute_shap_values",
+        {
+            "model_rds": model_rds,
+            "data_train_csv": str(DATA / "ml_features_train_with_target.csv"),
+            "task_type": "classification",
+            "target_column": "target",
+            "trait_positive": "1",
+            "n_cores": 1,
+        },
+    )
+    assert not result.is_error
+    sc = result.structured_content
+    assert sc["summary"]["class"] == "data.frame"
+
+
+@pytest.mark.anyio
 async def test_default_metric_surfaces_known_upstream_bug(client: Client) -> None:
     # metric left unset -> pipeML's own default path -- currently broken upstream
     # ("argument is of length zero"; metric="Accuracy" explicitly instead hits a

@@ -10,17 +10,21 @@ library `Rscript` (on PATH) resolves to.
 from __future__ import annotations
 
 import logging
+import shutil
+import time
+import uuid
+from pathlib import Path
 from typing import Annotated, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from mcp_tme_servers.common.paths import server_home
-from mcp_tme_servers.common.r_bridge import args_from, csv_arg, csv_column_arg, lit, r_function_arg, rds_arg
-from mcp_tme_servers.common.session import SessionConfig
+from mcp_tme_servers.common.r_bridge import args_from, csv_arg, csv_column_arg, lit, named_args_arg, rds_arg
+from mcp_tme_servers.common.session import Session, SessionConfig, SessionError
 from mcp_tme_servers.common.tools import (
-    NETWORK_ANNOTATIONS,
     READ_ANNOTATIONS,
     OutputDir,
     RunResult,
@@ -34,13 +38,13 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "multideconv-server",
     instructions=(
-        'Tools for bulk RNAseq cell-type deconvolution: estimating the relative abundance of immune/stromal/tumor cell types from bulk transcriptomics, then reconciling disagreement across methods and signatures into a smaller set of trustworthy cell subgroups. The pipeline order is run_deconvolution -> analyze_deconvolution, then optionally benchmark_deconvolution (validate against known cell fractions), relate_subgroups_to_pathways (correlate with pathway activity), or replicate_subgroups (apply the same subgroup definitions to a new cohort). Deconvolution output from this server is the typical input to the pipeML, CellTFusion, and RaCInG servers in this same package.'
+        'Tools for bulk RNAseq cell-type deconvolution: estimating the relative abundance of immune/stromal/tumor cell types from bulk transcriptomics, then reconciling disagreement across methods and signatures into a smaller set of cell subgroups. The pipeline order is run_deconvolution -> analyze_deconvolution, then optionally benchmark_deconvolution (validate against known cell fractions), relate_subgroups_to_pathways (correlate with pathway activity), or replicate_subgroups (apply the same subgroup definitions to a new cohort). Deconvolution output from this server is the typical input to the pipeML, CellTFusion, and RaCInG servers in this same package.'
     ),
 )
 
 SESSION_CONFIG = SessionConfig(
     sessions_root=server_home("multideconv") / "runs" / "sessions",
-    stage_by_tool={'run_deconvolution': 'deconvolution', 'analyze_deconvolution': 'harmonization', 'benchmark_deconvolution': 'benchmarking', 'relate_subgroups_to_pathways': 'pathway_relation', 'replicate_subgroups': 'subgroup_replication'},
+    stage_by_tool={'run_deconvolution': 'deconvolution', 'analyze_deconvolution': 'harmonization', 'benchmark_deconvolution': 'benchmarking', 'relate_subgroups_to_pathways': 'pathway_relation', 'replicate_subgroups': 'subgroup_replication', 'prepare_deconvolution_folds': 'fold_preparation'},
     export_requires=[frozenset({'deconvolution'}), frozenset({'harmonization'})],
     stage_explanations={'deconvolution': 'no cell-type deconvolution has been run yet (run_deconvolution) -- there is no cell-type abundance data in this session to export.', 'harmonization': "deconvolution results haven't been harmonized across methods/signatures yet (analyze_deconvolution) -- exporting now would give raw, per-method-and-signature columns full of redundant or disagreeing features instead of the reduced, cross-method-agreed cell subgroups that downstream analyses are meant to consume."},
 )
@@ -73,7 +77,7 @@ def _analyze_deconvolution_glossary() -> dict[str, str]:
             "The harmonized cell-type proportion matrix after merging agreeing "
             "method/signature estimates into subgroups and removing zero-heavy/low-variance "
             "features -- this is the main output to carry into downstream analysis "
-            "(pipeML-server, CellTFusion-server, RaCInG-server)."
+            "(for example pipeML-server, CellTFusion-server, RaCInG-server)."
         ),
         "Deconvolution subgroups per cell types": (
             "For each canonical cell type, which method/signature combinations were judged "
@@ -236,6 +240,61 @@ async def run_deconvolution(
     cell_label_column: Annotated[str | None, Field(description="Column in sc_metadata_csv giving each cell's type label.")] = None,
     sample_label_column: Annotated[str | None, Field(description="Column in sc_metadata_csv giving each cell's sample of origin.")] = None,
     methods_sc: Annotated[list[str], Field(description="Second-generation methods to run if sc_deconv=True.")] = ["Autogenes", "BayesPrism", "Bisque", "CPM", "MuSic", "SCDC"],
+    methods_sig: Annotated[
+        list[Literal["DWLS", "CIBERSORTx", "MOMF", "BSeqsc"]],
+        Field(
+            description=(
+                "Which methods to build a custom signature with, if create_signature=True "
+                "(default: all four). CIBERSORTx additionally requires credentials_mail/"
+                "credentials_token to actually run; BSeq-SC additionally requires cell_markers "
+                "and is silently skipped without it. Ignored unless create_signature=True."
+            )
+        ),
+    ] = ["DWLS", "CIBERSORTx", "MOMF", "BSeqsc"],
+    name_sc_signature: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Name to give the custom signature being created, used in its output file names "
+                "(e.g. Results/custom_signatures/DWLS-<name_sc_signature>-scRNAseq.txt under this "
+                "call's run_dir). Give it a real, memorable name if you intend to reference this "
+                "signature later via signatures_select in another call -- if left unset, the "
+                "files get a generic name instead, and a later create_signature=True call reusing "
+                "the same output_dir will silently overwrite them rather than creating a "
+                "distinctly-named second signature. Ignored unless create_signature=True."
+            )
+        ),
+    ] = None,
+    cell_markers: Annotated[
+        dict[str, list[str]] | None,
+        Field(
+            description=(
+                "Cell type name -> list of marker gene symbols, used only by the BSeq-SC method "
+                "when building a custom signature (create_signature=True and 'BSeqsc' in "
+                "methods_sig). If omitted, BSeq-SC is skipped during signature creation "
+                "regardless of methods_sig. Ignored otherwise."
+            )
+        ),
+    ] = None,
+    custom_signature_files: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Paths to pre-computed, method-specific signature .txt files (the same format "
+                "multideconv itself writes, e.g. from an earlier create_signature=True run, or "
+                "hand-built following that format) to make available ADDITIONALLY to the bundled "
+                "package signatures, without recomputing them. compute.deconvolution only reads "
+                "custom signatures from a fixed relative folder (Results/custom_signatures/ under "
+                "this call's own run directory), so each file is copied there before the R call "
+                "runs -- you don't need to place them there yourself, and each file's own name is "
+                "preserved (matters for signatures_select, which matches against file name minus "
+                "extension). Not needed if create_signature=True: that path already creates and "
+                "reads back from that same folder within one call. If output_dir/session_id are "
+                "both omitted, a run directory is still resolved up front (same as the auto-named "
+                "one this call would otherwise get) so the copy has somewhere to land."
+            )
+        ),
+    ] = None,
 ) -> RunResult:
     """Estimate cell-type abundance from bulk RNAseq (multideconv::compute.deconvolution).
 
@@ -243,13 +302,44 @@ async def run_deconvolution(
     expression matrix, producing one abundance/proportion column per method-signature-cell-type
     combination -- e.g. `Epidish_TIL10_CD8.cells` is EpiDISH's estimate of CD8 T-cell fraction
     using the TIL10 signature. Nothing is merged or reconciled at this stage; that happens next.
+    Cell type proportions sum to 1 (100%) only within each method_signature combination, not per
+    row, because multideconv concatenates the cell-type columns from every method_signature
+    combination together.
 
     WHEN: this is the first step of every pipeline on this server. Its output feeds
     analyze_deconvolution to reconcile disagreement across methods, and from there into
     pipeML-server, CellTFusion-server, or RaCInG-server.
 
+    Before calling this tool, ask the user whether they already have pre-computed custom
+    signature file(s) (not built via create_signature) they'd like included alongside the
+    bundled ones -- don't assume none exist just because none were mentioned. If they do, ask
+    where those files are and pass their paths via custom_signature_files; do not place or copy
+    them anywhere yourself outside of that parameter -- see its own description for why a fixed
+    folder matters here.
+
     Returns a samples x features matrix of cell-type proportions.
     """
+    if custom_signature_files:
+        if output_dir is not None:
+            resolved_output_dir = output_dir
+        elif session_id is not None:
+            try:
+                session = Session.load(SESSION_CONFIG, session_id)
+            except SessionError as e:
+                raise ToolError(str(e)) from e
+            resolved_output_dir = str(session.run_dir_for("run_deconvolution"))
+        else:
+            resolved_output_dir = str(
+                server_home("multideconv") / "runs" /
+                f"run_deconvolution_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            )
+        dest = Path(resolved_output_dir).expanduser().resolve() / "Results" / "custom_signatures"
+        dest.mkdir(parents=True, exist_ok=True)
+        for src in custom_signature_files:
+            src_path = Path(src).expanduser().resolve()
+            shutil.copy2(src_path, dest / src_path.name)
+        output_dir = resolved_output_dir
+
     args = args_from(
         **{
             "raw.counts": csv_arg(raw_counts_csv, row_names=1, as_matrix=True),
@@ -270,11 +360,14 @@ async def run_deconvolution(
             "cell_label": csv_column_arg(sc_metadata_csv, cell_label_column) if (sc_metadata_csv and cell_label_column) else None,
             "sample_label": csv_column_arg(sc_metadata_csv, sample_label_column) if (sc_metadata_csv and sample_label_column) else None,
             "methods_sc": lit(methods_sc) if sc_deconv else None,
+            "methods_sig": lit(methods_sig) if create_signature else None,
+            "name_sc_signature": lit(name_sc_signature) if name_sc_signature else None,
+            "cell_markers": named_args_arg(cell_markers) if cell_markers else None,
         }
     )
     return await _run(
         package="multideconv", function="compute.deconvolution", args=args, tool_name="run_deconvolution",
-        ctx=ctx, timeout=1800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        ctx=ctx, timeout=28800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
     )
 
 
@@ -437,7 +530,9 @@ async def relate_subgroups_to_pathways(
     WHAT: for each harmonized cell-type subgroup from analyze_deconvolution, correlates its
     abundance against each pathway's activity score across samples -- e.g. does CD8 T-cell
     abundance track with interferon-gamma pathway activity in this cohort. Saves one heatmap PDF
-    per cell type.
+    per cell type. It helps to know what each subgroup of a specific cell type corresponds to (e.g
+    CD8 has 3 subgroups: subgroup.iteration.1, subgroup.iteration.2, etc); pathway association tells
+    which subgroup corresponds to which biological behavior.
 
     WHEN: after analyze_deconvolution, once you have (or compute separately, e.g. via
     CellTFusion-server) a pathway activity matrix you want to relate cell composition to.
@@ -479,7 +574,8 @@ async def replicate_subgroups(
 
     WHEN: for a validation/replication cohort you want to score consistently with a discovery
     cohort's already-established subgroups -- e.g. before pooling both into a joint downstream
-    analysis, or validating a model trained on the discovery cohort's harmonized features.
+    analysis, or validating a model trained on the discovery cohort's harmonized features when 
+    using pipeML-server.
 
     Returns a data.frame with the projected subgroup feature proportions for the new cohort.
     """
@@ -492,6 +588,116 @@ async def replicate_subgroups(
     return await _run(
         package="multideconv", function="replicate_deconvolution_subgroups", args=args, tool_name="replicate_subgroups",
         ctx=ctx, timeout=300, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+async def prepare_deconvolution_folds(
+    deconvolution_csv: Annotated[
+        str,
+        Field(
+            description=(
+                "Raw (unharmonized) deconvolution matrix CSV (samples as rows, features as "
+                "columns) from run_deconvolution's result.csv -- the same input shape "
+                "analyze_deconvolution takes. For classification, this CSV must already include "
+                "a literal 'target' column with each sample's class label (add one before "
+                "calling if it isn't there yet). For survival, leave target out and use "
+                "target_csv/time_column/event_column instead."
+            )
+        ),
+    ],
+    ctx: Context,
+    output_dir: OutputDir = None,
+    session_id: SessionIdParam = None,
+    compute_full_dataset: Annotated[
+        bool,
+        Field(
+            description=(
+                "If True (default, and currently the only working path -- see the known upstream "
+                "bug noted below), harmonizes deconvolution_csv once across its whole cohort, "
+                "attaching target/time/event -- equivalent to what pipeML's fold_construction_fun "
+                "contract does on its own final full-data refit after cross-validation. If False, "
+                "instead constructs per-fold training/test subsets using folds (see that "
+                "parameter) -- the code path this function is actually meant for when driven by "
+                "pipeML-server's train_ml_model(fold_construction_fun='prepare_multideconv_folds'), "
+                "but it currently has an upstream bug that makes it return nothing usable."
+            )
+        ),
+    ] = True,
+    folds: Annotated[
+        dict[str, list[int]] | None,
+        Field(
+            description=(
+                "Required if compute_full_dataset=False: fold name -> 1-indexed row numbers of "
+                "deconvolution_csv to use as that fold's TRAINING set (the test set is every "
+                "other row, implicitly). This mirrors what train_ml_model constructs internally "
+                "via caret when driving this function as its fold_construction_fun -- building it "
+                "by hand here is mainly for inspecting or debugging one specific fold's harmonized "
+                "output, e.g. {\"Fold1\": [1, 2, 3, 4, 5], \"Fold2\": [6, 7, 8, 9, 10]}."
+            )
+        ),
+    ] = None,
+    target_csv: Annotated[str | None, Field(description="CSV with time_column/event_column, row-aligned to deconvolution_csv -- survival tasks only.")] = None,
+    time_column: Annotated[str | None, Field(description="Column in target_csv with survival time -- survival tasks only, instead of a 'target' column in deconvolution_csv.")] = None,
+    event_column: Annotated[str | None, Field(description="Column in target_csv with the event indicator -- survival tasks only.")] = None,
+    trait_positive: Annotated[str | None, Field(description="Value in the event column that represents event=1 -- survival tasks only.")] = None,
+    ncores: Annotated[int | None, Field(description="CPU cores for parallel fold processing when compute_full_dataset=False; default detectCores()-2.")] = None,
+    cells_extra: CellTypeList = None,
+    corr: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's corr -- minimum correlation for merging method/signature estimates into a subgroup.")] = 0.7,
+    corr_type: Annotated[Literal["spearman", "pearson"], Field(description="Same as analyze_deconvolution's corr_type.")] = "spearman",
+    zero_thr: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's zero_thr.")] = 0.9,
+    var_quantile: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's var_quantile.")] = 0.25,
+    prune_thr: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's prune_thr.")] = 0.9,
+    seed: Annotated[int | None, Field(description="Same as analyze_deconvolution's seed.")] = None,
+    batch_csv: Annotated[str | None, Field(description="Optional CSV with a batch/cohort covariate column, row-aligned to deconvolution_csv -- same partial-correlation behavior as analyze_deconvolution's batch_csv.")] = None,
+    batch_column: Annotated[str | None, Field(description="Column in batch_csv identifying each sample's batch/cohort.")] = None,
+) -> RunResult:
+    """Inspect what pipeML's custom fold-construction integration would train on
+    (multideconv::prepare_multideconv_folds).
+
+    WHAT: this is the same harmonization multideconv::compute.deconvolution.analysis() performs
+    (see analyze_deconvolution), but packaged to match pipeML's fold_construction_fun contract --
+    it's what pipeML-server's train_ml_model calls internally, per fold, when given
+    fold_construction_fun="prepare_multideconv_folds". Calling it here standalone lets you inspect
+    the harmonized subgroup features before committing to a full, potentially slow train_ml_model
+    run, or reproduce/debug one specific fold's projected test features.
+
+    WHEN: before train_ml_model with fold_construction_fun="prepare_multideconv_folds", to sanity
+    check what the deconvolution harmonization would actually produce for this cohort -- or
+    afterwards, to inspect a specific fold's output directly.
+
+    TEMP: known upstream bug -- when compute_full_dataset=False (the per-fold path), this function
+    computes and saves each fold's processed data to Results/fold_*.rds but returns NULL instead
+    of the fold list, due to a missing return() statement in multideconv::prepare_multideconv_folds.
+    The fold files are still written and listed under output_files, but this tool's own
+    summary/result.rds will show an empty NULL result rather than the fold data -- and this also
+    means train_ml_model(fold_construction_fun="prepare_multideconv_folds") will currently break
+    once it reaches this same per-fold path during cross-validation. A fix is pending in the
+    multideconv package; remove this warning once confirmed fixed. compute_full_dataset=True (the
+    default) uses a different, unaffected code path.
+    """
+    args = args_from(
+        **{
+            "data": csv_arg(deconvolution_csv, row_names=1),
+            "folds": named_args_arg(folds) if folds else None,
+            "bestune": lit(True) if compute_full_dataset else None,
+            "ncores": lit(ncores) if ncores is not None else None,
+            "time_var": csv_column_arg(target_csv, time_column) if (target_csv and time_column) else None,
+            "event_var": csv_column_arg(target_csv, event_column) if (target_csv and event_column) else None,
+            "trait.positive": lit(trait_positive) if trait_positive else None,
+            "cells_extra": lit(cells_extra) if cells_extra else None,
+            "corr": lit(corr),
+            "corr_type": lit(corr_type),
+            "zero_thr": lit(zero_thr),
+            "var_quantile": lit(var_quantile),
+            "prune_thr": lit(prune_thr),
+            "seed": lit(seed) if seed is not None else None,
+            "batch": csv_column_arg(batch_csv, batch_column) if (batch_csv and batch_column) else None,
+        }
+    )
+    return await _run(
+        package="multideconv", function="prepare_multideconv_folds", args=args, tool_name="prepare_deconvolution_folds",
+        ctx=ctx, timeout=1800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
     )
 
 

@@ -17,10 +17,9 @@ from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from mcp_tme_servers.common.paths import server_home
-from mcp_tme_servers.common.r_bridge import args_from, csv_arg, csv_column_arg, lit, r_function_arg, rds_arg
+from mcp_tme_servers.common.r_bridge import args_from, csv_arg, lit
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
-    NETWORK_ANNOTATIONS,
     READ_ANNOTATIONS,
     OutputDir,
     RunResult,
@@ -232,7 +231,7 @@ async def run_celltfusion(
     )
     return await _run(
         package="CellTFusion", function="CellTFusion", args=args, tool_name="run_celltfusion",
-        ctx=ctx, timeout=3600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        ctx=ctx, timeout=28800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary=_CELLTFUSION_GLOSSARY, diagnostics=_celltfusion_diagnostics,
     )
 

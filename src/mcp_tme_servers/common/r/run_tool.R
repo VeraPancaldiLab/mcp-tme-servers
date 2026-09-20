@@ -18,8 +18,15 @@
 #
 # Other arg "__type__"s: "csv_column" (one named column, as a named vector),
 # "csv_list" (a CSV wrapped as list(df)), "csv_rownames" (a CSV's row names as
-# a plain character vector), "rds" (readRDS()'d as-is). See common/r_bridge.py
-# for the Python-side constructors.
+# a plain character vector), "rds" (readRDS()'d as-is), "rds_element" (one
+# named element of a .rds file's top-level list, e.g. a prior tool's
+# result.rds$Model), "r_named_function" (a function exported by an installed
+# sister package, looked up by name -- e.g. multideconv::prepare_multideconv_folds,
+# for a parameter that expects an actual R function object), "named_args" (a
+# named list of heterogeneously-typed values, e.g. for pipeML's
+# fold_construction_args_fixed, meant to be spliced into another call via
+# do.call() rather than passed as one argument). See common/r_bridge.py for
+# the Python-side constructors.
 #
 # Exactly one of "package" (an installed R package, function looked up via
 # asNamespace()) or "source" (a standalone .r script, source()'d into its own
@@ -44,6 +51,8 @@ workdir <- manifest$workdir
 dir.create(workdir, recursive = TRUE, showWarnings = FALSE)
 setwd(workdir)
 
+is_scalarish <- function(v) is.character(v) || is.numeric(v) || is.logical(v) || is.null(v)
+
 resolve_arg <- function(spec) {
   if (is.null(spec)) return(NULL)
   type <- spec[["__type__"]]
@@ -52,7 +61,7 @@ resolve_arg <- function(spec) {
   if (type == "literal") {
     val <- spec$value
     if (is.list(val)) {
-      scalar <- all(vapply(val, function(v) is.character(v) || is.numeric(v) || is.logical(v) || is.null(v), logical(1)))
+      scalar <- all(vapply(val, is_scalarish, logical(1)))
       if (scalar) val <- unlist(val)
     }
     return(val)
@@ -92,8 +101,29 @@ resolve_arg <- function(spec) {
     return(readRDS(spec$path))
   }
 
+  if (type == "rds_element") {
+    return(readRDS(spec$path)[[spec$element]])
+  }
+
   if (type == "r_function") {
     return(get(spec$value, mode = "function", envir = baseenv()))
+  }
+
+  if (type == "r_named_function") {
+    return(get(spec$value, mode = "function", envir = asNamespace(spec$package)))
+  }
+
+  if (type == "named_args") {
+    val <- spec$value
+    if (is.null(val)) return(list())
+    val <- lapply(val, function(v) {
+      if (is.list(v)) {
+        scalar <- all(vapply(v, is_scalarish, logical(1)))
+        if (scalar) v <- unlist(v)
+      }
+      v
+    })
+    return(val)
   }
 
   stop("Unknown arg type: ", type)
@@ -125,7 +155,28 @@ if (!is.null(manifest$source)) {
   # multideconv::compute.deconvolution() as a bare compute.deconvolution()), which
   # only resolves if that sister package is attached, not merely installed. Attach
   # all four regardless of which one is this server's target package.
-  for (sister_pkg in c("multideconv", "pipeML", "CellTFusion", "RaCInG")) {
+  #
+  # If any of the four isn't installed at all, install it from its VeraPancaldiLab
+  # GitHub source (install-if-missing only -- this never reinstalls/updates an
+  # already-installed package, so a newer push to one of these repos requires
+  # manually reinstalling it yourself; see this project's README).
+  sister_install_cmds <- list(
+    multideconv = function() pak::pkg_install("VeraPancaldiLab/multideconv"),
+    pipeML = function() pak::pkg_install("VeraPancaldiLab/pipeML"),
+    CellTFusion = function() pak::pkg_install("VeraPancaldiLab/CellTFusion"),
+    RaCInG = function() remotes::install_github("VeraPancaldiLab/RaCInG_package")
+  )
+
+  for (sister_pkg in names(sister_install_cmds)) {
+    if (!requireNamespace(sister_pkg, quietly = TRUE)) {
+      installer_pkg <- if (identical(sister_pkg, "RaCInG")) "remotes" else "pak"
+      if (!requireNamespace(installer_pkg, quietly = TRUE)) {
+        message("'", installer_pkg, "' not found -- installing it from CRAN first...")
+        utils::install.packages(installer_pkg, repos = "https://cloud.r-project.org")
+      }
+      message("Package '", sister_pkg, "' not found -- installing from GitHub (this only happens once)...")
+      sister_install_cmds[[sister_pkg]]()
+    }
     suppressMessages(library(sister_pkg, character.only = TRUE))
   }
   fun <- get(manifest$`function`, envir = asNamespace(manifest$package))

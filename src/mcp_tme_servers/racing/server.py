@@ -17,11 +17,10 @@ from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from mcp_tme_servers.common.paths import server_home
-from mcp_tme_servers.common.r_bridge import args_from, csv_arg, csv_column_arg, lit, r_function_arg, rds_arg
+from mcp_tme_servers.common.r_bridge import args_from, csv_arg, lit, r_function_arg, rds_arg
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
     NETWORK_ANNOTATIONS,
-    READ_ANNOTATIONS,
     OutputDir,
     RunResult,
     SessionIdParam,
@@ -261,7 +260,7 @@ async def run_racing_kernel(
     )
     return await _run(
         package="RaCInG", function="compute_racing_kernel", args=args, tool_name="run_racing_kernel",
-        ctx=ctx, timeout=1800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        ctx=ctx, timeout=28800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary=_KERNEL_GLOSSARY,
     )
 
@@ -342,7 +341,7 @@ async def run_racing_montecarlo(
     )
     return await _run(
         package="RaCInG", function="compute_racing_montecarlo", args=args, tool_name="run_racing_montecarlo",
-        ctx=ctx, timeout=3600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        ctx=ctx, timeout=28800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary=_MC_GLOSSARY,
     )
 

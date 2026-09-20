@@ -20,16 +20,41 @@ All five servers use MCP over stdio and are distributed together as
 
 - Python >= 3.12.
 - MCP Python SDK 2.x, installed automatically with this package.
-- R with `multideconv`, `pipeML`, `CellTFusion`, and `RaCInG` installed in the
-  system R library that `Rscript` (must be on `PATH`) resolves to -- these
-  are not pip/CRAN packages and aren't installed automatically; see each
-  package's own repository for install instructions.
+- R, with `Rscript` on `PATH`. `multideconv`, `pipeML`, `CellTFusion`, and
+  `RaCInG` are auto-installed the first time a tool needs one that isn't
+  already present in that R's library -- see [Automatic R package
+  installation](#automatic-r-package-installation) below for exactly what
+  that does and does not cover.
 - A checkout of [Bioinfo-tools](https://github.com/mhurtado13/Bioinfo-tools)
   (its `functions.r`, not a package, so `library()` won't find it) with its
   own R dependencies (decoupleR, GSVA, edgeR, limma, survival, survminer,
   gridExtra, WGCNA, ADImpute, sva, ggpubr, ggstatsplot, ...) installed in the
   same R library. Defaults to `~/Documents/Bioinfo-tools/functions.r`;
-  override with `BIOINFOTOOLS_SCRIPT` if checked out elsewhere.
+  override with `BIOINFOTOOLS_SCRIPT` if checked out elsewhere. Not covered
+  by auto-install (see below) -- it's a script, not a package, and will move
+  to its own installable package later.
+
+**Recommended: a dedicated R environment.** Since this project just shells
+out to whichever `Rscript` is first on `PATH` (no hardcoded R install path
+anywhere in this codebase), running it inside a dedicated conda/mamba
+environment with its own R and package library -- rather than your system R,
+or an R shared with other projects -- avoids version conflicts between these
+four packages' dependencies and anything else you have installed. No code
+changes are needed for this: just make sure that environment is activated
+(so its `Rscript` resolves first) in whichever shell you use to register/run
+these servers, e.g. via `claude mcp add`.
+
+## Automatic R package installation
+
+`multideconv`, `pipeML`, `CellTFusion`, and `RaCInG` are installed
+automatically, on first use, if missing:
+
+| Package | Install command |
+|---|---|
+| multideconv | `pak::pkg_install("VeraPancaldiLab/multideconv")` |
+| pipeML | `pak::pkg_install("VeraPancaldiLab/pipeML")` |
+| CellTFusion | `pak::pkg_install("VeraPancaldiLab/CellTFusion")` |
+| RaCInG | `remotes::install_github("VeraPancaldiLab/RaCInG_package")` |
 
 ## How it works
 
@@ -122,7 +147,7 @@ and the tail of R's console log -- not a bare stack trace.
 
 ## Servers
 
-### multideconv (8 tools: 5 analysis + 3 session)
+### multideconv (9 tools: 6 analysis + 3 session)
 
 | Tool | R function |
 |---|---|
@@ -131,31 +156,98 @@ and the tail of R's console log -- not a bare stack trace.
 | `benchmark_deconvolution` | `multideconv::compute.benchmark` |
 | `relate_subgroups_to_pathways` | `multideconv::compute.subgroup.pathways` |
 | `replicate_subgroups` | `multideconv::replicate_deconvolution_subgroups` |
+| `prepare_deconvolution_folds` | `multideconv::prepare_multideconv_folds` |
 
 Pipeline: `run_deconvolution` -> `analyze_deconvolution` -> optionally
 `benchmark_deconvolution` / `relate_subgroups_to_pathways` /
 `replicate_subgroups`. Export requires `deconvolution` + `harmonization`.
+`prepare_deconvolution_folds` is a separate, optional inspection tool (not
+required for export) -- it packages the same harmonization as
+`analyze_deconvolution` to match pipeML's `fold_construction_fun` contract
+(see the pipeML section below); it's what `train_ml_model` calls internally
+per fold when driven with `fold_construction_fun="prepare_multideconv_folds"`.
 
-### pipeML (5 tools: 2 analysis + 3 session)
+`run_deconvolution`'s `create_signature=True` builds a custom signature
+matrix from a matched single-cell reference (`sc_matrix_csv`/`sc_metadata_csv`)
+and uses it in that same call -- `methods_sig` picks which signature-building
+methods run, `name_sc_signature` names the resulting files (give it a real
+name if you'll want to select this exact signature again later via
+`signatures_select`, otherwise repeat runs silently overwrite each other's
+generically-named files), and `cell_markers` is required for the BSeq-SC
+method specifically. If you already have signature files computed elsewhere
+(not built via `create_signature`) that you want included alongside the
+bundled ones, pass their paths via `custom_signature_files` instead -- the
+underlying R function only ever reads custom signatures from a fixed folder
+relative to the run directory (`Results/custom_signatures/`), so this tool
+copies each file there for you before calling R.
+
+**Known upstream issue (TEMP -- a fix is pending, remove this bullet once
+confirmed):** `prepare_multideconv_folds()`'s per-fold construction path
+(`compute_full_dataset=False` on `prepare_deconvolution_folds`, or when
+driven internally by `train_ml_model`'s `fold_construction_fun`) computes and
+saves each fold's data to `Results/fold_*.rds` but returns `NULL` instead of
+the fold list, due to a missing `return()` statement in
+`multideconv::prepare_multideconv_folds`. The fold files are still written
+and listed under `output_files`, but the returned summary is empty, and this
+also breaks `train_ml_model(fold_construction_fun="prepare_multideconv_folds")`
+once cross-validation reaches this path. `compute_full_dataset=True` (the
+default) uses a different, unaffected code path.
+
+### pipeML (6 tools: 3 analysis + 3 session)
 
 | Tool | R function |
 |---|---|
 | `train_ml_model` | `pipeML::compute_features.training.ML` |
-| `train_and_evaluate_ml_model` | `pipeML::compute_features.ML` |
+| `predict_ml_model` | `pipeML::compute_prediction` |
+| `compute_shap_values` | `pipeML::compute_shap_values` |
 
-Typically consumes feature tables produced by the multideconv or CellTFusion
-servers. Export requires at least one model trained.
+Pipeline: `train_ml_model` (train + cross-validate) -> `predict_ml_model`
+(score a held-out test set) -> optionally `compute_shap_values` (per-feature
+importance). Typically consumes feature tables produced by the multideconv
+or CellTFusion servers. Export requires at least one model trained.
 
-**Known upstream issue:** any call that doesn't explicitly pass
-`metric="AUROC"` or `"AUPRC"` currently crashes inside pipeML itself
-(`R/machine_learning.R`) -- `hyperparams` is only assigned inside the
-`if (metric == "AUROC" || metric == "AUPRC")` branch but read unconditionally
-afterward. Both tools' docstrings carry this workaround, and
+`train_ml_model` supports standard repeated/LODO k-fold CV by default, or a
+custom `fold_construction_fun` for **sample-dependent features** -- ones
+computed relative to the whole training cohort (deconvolution/harmonization
+subgroups, WGCNA modules, GSVA scores, PCA components, clustering) rather
+than independently per sample. Computing such features once on the full
+dataset before cross-validating leaks test-fold information into training;
+`fold_construction_fun` recomputes the feature space fresh per fold instead.
+Only `"prepare_multideconv_folds"` (multideconv's bundled implementation,
+also exposed standalone as multideconv-server's `prepare_deconvolution_folds`
+for inspection) is available, since an arbitrary R function object can't
+cross this project's JSON-over-subprocess bridge -- see that parameter's own
+description for how to write a custom one following pipeML's own vignette
+pattern (only usable by calling pipeML directly in R, not through this tool).
+When `fold_construction_fun` was used for training, `predict_ml_model`'s test
+data must first be projected into that same learned feature space (e.g. via
+multideconv-server's `replicate_subgroups`) rather than fed in raw -- see
+`train_ml_model`'s `Custom_output` field and `predict_ml_model`'s own
+docstring.
+
+`predict_ml_model` and `compute_shap_values` both read `train_ml_model`'s
+result.rds's `Model` element internally -- pass that call's `run_dir/result.rds`
+directly as `model_rds`, not a manually extracted sub-object.
+
+**Known upstream issue:** any `train_ml_model` call that doesn't explicitly
+pass `metric="AUROC"` or `"AUPRC"` for classification currently crashes
+inside pipeML itself (`R/machine_learning.R`) -- `hyperparams` is only
+assigned inside the `if (metric == "AUROC" || metric == "AUPRC")` branch but
+read unconditionally afterward. `train_ml_model`'s docstring carries this
+workaround, and
 `tests/test_pipeml.py::test_default_metric_surfaces_known_upstream_bug`
 documents the failure directly so it's caught if pipeML's pinned version
-changes without the bug being fixed. Also: `compute_features.ML`'s `coldata`
-must have at least two columns (a single-column `coldata` collapses to a
-vector on subsetting and raises `incorrect number of dimensions`).
+changes without the bug being fixed.
+
+This server previously also exposed `train_and_evaluate_ml_model`
+(`pipeML::compute_features.ML`), a combined train+evaluate call. It has been
+removed: besides the `hyperparams` bug above, its classification branch
+separately references an undeclared `fold_models_dir` variable (present on
+`compute_features.training.ML`'s signature but not on `compute_features.ML`'s
+own), raising `object 'fold_models_dir' not found` for any classification
+call -- doubly broken, and no test exercised it. Use `train_ml_model` then
+`predict_ml_model` instead, which compose the same two steps working
+correctly and independently.
 
 ### CellTFusion (4 tools: 1 analysis + 3 session)
 
@@ -220,45 +312,6 @@ result via `input_data_rds`.
 and `scores_stat_analysis_categorical` are themselves dispatchers over the
 three continuous and four categorical `scores_*_test` tools, respectively,
 so 16 distinct analyses are exposed as 18 tool entry points.
-
-IMPORTANT -- footprint methods: `compute_tf_activity`/`compute_tf_activity_deg`'s
-`tf_collection='CollecTRI'`/`'Dorothea'` and `compute_pathway_activity`'s default
-`pathway_source='PROGENy'` are this server's three FOOTPRINT-based databases (they
-score a regulator's activity from its curated targets'/responsive genes' expression,
-not the regulator's own expression). `tf_collection='ARACNE'` (a data-driven,
-per-cohort network) and `pathway_source='KEGG'/'REACTOME'/'Hallmark'` (unsigned
-MSigDB gene set collections) are the non-footprint alternatives; `compute_enrichment`'s
-GO/KEGG/REACTOME/PROGENy/Hallmark databases are plain ORA/GSEA gene-set testing, not
-footprint inference at all.
-
-Standalone utilities, not one fixed pipeline -- reach for whichever function
-fits the current step. `compute_normalization` typically runs first on raw
-counts, since `compute_tf_activity`/`compute_pathway_activity` expect
-already-normalized, log-scale expression (its `zscore` default is `False` for this
-reason); `run_deg_analysis`'s full signature (`pval=1`) feeds `compute_tf_activity_deg`
-or `compute_enrichment(method='GSEA')`, and its significant genes feed
-`compute_enrichment(method='ORA')`. Results from any of these (or from
-multideconv-server/CellTFusion-server/RaCInG-server) are typical inputs to
-`compute_survival_analysis` or the `scores_*`/`scores_stat_analysis(_categorical)`
-trait-association tools. Export requires at least one analysis tool to have
-completed.
-
-Unlike the other four servers, this one runs `run_tool.R` in "source" mode
-(see [How it works](#how-it-works)): it needs a local checkout of
-[Bioinfo-tools](https://github.com/mhurtado13/Bioinfo-tools) rather than an
-installed R package -- see [Requirements](#requirements) for the
-`BIOINFOTOOLS_SCRIPT` override.
-
-## Shared upstream issue (all four package servers)
-
-`CellTFusion()` and RaCInG's `prepare_input_files()`/internal helpers call
-`multideconv::compute.deconvolution()` (and related functions) without an
-`importFrom`/`pkg::fn()` qualification, so they only resolve when
-`multideconv` is separately attached in the R session, not merely installed
-as a declared dependency. `common/r/run_tool.R` works around this by
-attaching all four upstream packages regardless of which server's tool is
-actually running -- worth fixing upstream via each package's
-`NAMESPACE`/roxygen `@importFrom`.
 
 ## Example prompts
 
