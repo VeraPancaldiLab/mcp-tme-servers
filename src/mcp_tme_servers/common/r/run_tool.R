@@ -28,10 +28,9 @@
 # do.call() rather than passed as one argument). See common/r_bridge.py for
 # the Python-side constructors.
 #
-# Exactly one of "package" (an installed R package, function looked up via
-# asNamespace()) or "source" (a standalone .r script, source()'d into its own
-# environment -- for Bioinfo-tools, which isn't an installed package) must be
-# given.
+# "package" is an installed R package; "function" is looked up in it via
+# asNamespace(). All five servers in this repo (multideconv, pipeML,
+# CellTFusion, RaCInG, BioinfoTools) run this way.
 #
 # Writes workdir/result.rds (full return value), workdir/result_summary.json,
 # and any CSVs for tabular elements of the result. The function itself is run
@@ -50,6 +49,13 @@ manifest <- fromJSON(argv[[1]], simplifyVector = FALSE)
 workdir <- manifest$workdir
 dir.create(workdir, recursive = TRUE, showWarnings = FALSE)
 setwd(workdir)
+
+# multideconv's own .onLoad hook creates this as a side effect of being
+# attached below, but BioinfoTools doesn't (its functions still write to
+# "Results/..." directly) -- create it up front, unconditionally, so every
+# package's functions can rely on it existing regardless of which one this
+# call targets.
+dir.create(file.path(workdir, "Results"), recursive = TRUE, showWarnings = FALSE)
 
 is_scalarish <- function(v) is.character(v) || is.numeric(v) || is.logical(v) || is.null(v)
 
@@ -135,52 +141,45 @@ for (nm in names(raw_args)) {
   call_args[[nm]] <- resolve_arg(raw_args[[nm]])
 }
 
-if (!is.null(manifest$source)) {
-  # Bioinfo-tools isn't an installed package -- source() its script into its
-  # own environment and look the function up there. Its functions use %>%
-  # without an explicit library(magrittr)/library(dplyr) of their own (every
-  # other call is already `pkg::fun()`-qualified), so attach magrittr for that
-  # operator. Its functions also expect a "Results/" dir under the working
-  # directory to already exist (same convention documented in its own
-  # README/usage example), which the other four packages' functions create
-  # for themselves internally.
-  suppressMessages(library(magrittr))
-  dir.create(file.path(workdir, "Results"), recursive = TRUE, showWarnings = FALSE)
-  fn_env <- new.env(parent = globalenv())
-  sys.source(manifest$source, envir = fn_env)
-  fun <- get(manifest$`function`, mode = "function", envir = fn_env)
-} else {
-  # These four packages call into each other's exported functions without an
-  # explicit `pkg::fun()` prefix (e.g. CellTFusion() calls
-  # multideconv::compute.deconvolution() as a bare compute.deconvolution()), which
-  # only resolves if that sister package is attached, not merely installed. Attach
-  # all four regardless of which one is this server's target package.
-  #
-  # If any of the four isn't installed at all, install it from its VeraPancaldiLab
-  # GitHub source (install-if-missing only -- this never reinstalls/updates an
-  # already-installed package, so a newer push to one of these repos requires
-  # manually reinstalling it yourself; see this project's README).
-  sister_install_cmds <- list(
-    multideconv = function() pak::pkg_install("VeraPancaldiLab/multideconv"),
-    pipeML = function() pak::pkg_install("VeraPancaldiLab/pipeML"),
-    CellTFusion = function() pak::pkg_install("VeraPancaldiLab/CellTFusion"),
-    RaCInG = function() remotes::install_github("VeraPancaldiLab/RaCInG_package")
-  )
-
-  for (sister_pkg in names(sister_install_cmds)) {
-    if (!requireNamespace(sister_pkg, quietly = TRUE)) {
-      installer_pkg <- if (identical(sister_pkg, "RaCInG")) "remotes" else "pak"
-      if (!requireNamespace(installer_pkg, quietly = TRUE)) {
-        message("'", installer_pkg, "' not found -- installing it from CRAN first...")
-        utils::install.packages(installer_pkg, repos = "https://cloud.r-project.org")
-      }
-      message("Package '", sister_pkg, "' not found -- installing from GitHub (this only happens once)...")
-      sister_install_cmds[[sister_pkg]]()
-    }
-    suppressMessages(library(sister_pkg, character.only = TRUE))
+# Install-if-missing only -- this never reinstalls/updates an already-installed
+# package, so a newer push to one of these repos requires manually reinstalling
+# it yourself; see this project's README.
+ensure_installed <- function(pkg, installer) {
+  if (requireNamespace(pkg, quietly = TRUE)) return(invisible(NULL))
+  installer_pkg <- if (identical(pkg, "RaCInG")) "remotes" else "pak"
+  if (!requireNamespace(installer_pkg, quietly = TRUE)) {
+    message("'", installer_pkg, "' not found -- installing it from CRAN first...")
+    utils::install.packages(installer_pkg, repos = "https://cloud.r-project.org")
   }
-  fun <- get(manifest$`function`, envir = asNamespace(manifest$package))
+  message("Package '", pkg, "' not found -- installing from GitHub (this only happens once)...")
+  installer()
 }
+
+# These four packages call into each other's exported functions without an
+# explicit `pkg::fun()` prefix (e.g. CellTFusion() calls
+# multideconv::compute.deconvolution() as a bare compute.deconvolution()), which
+# only resolves if that sister package is attached, not merely installed. Attach
+# all four regardless of which one is this server's target package.
+sister_install_cmds <- list(
+  multideconv = function() pak::pkg_install("VeraPancaldiLab/multideconv"),
+  pipeML = function() pak::pkg_install("VeraPancaldiLab/pipeML"),
+  CellTFusion = function() pak::pkg_install("VeraPancaldiLab/CellTFusion"),
+  RaCInG = function() remotes::install_github("VeraPancaldiLab/RaCInG_package")
+)
+for (sister_pkg in names(sister_install_cmds)) {
+  ensure_installed(sister_pkg, sister_install_cmds[[sister_pkg]])
+  suppressMessages(library(sister_pkg, character.only = TRUE))
+}
+
+# BioinfoTools is a standalone package -- none of the above call into it, nor
+# it into them -- so it's only installed/attached when it's actually this
+# call's target, rather than unconditionally like the four above.
+if (identical(manifest$package, "BioinfoTools")) {
+  ensure_installed("BioinfoTools", function() pak::pkg_install("mhurtado13/Bioinfo-tools"))
+  suppressMessages(library(BioinfoTools))
+}
+
+fun <- get(manifest$`function`, envir = asNamespace(manifest$package))
 
 is_error <- FALSE
 error_msg <- NULL

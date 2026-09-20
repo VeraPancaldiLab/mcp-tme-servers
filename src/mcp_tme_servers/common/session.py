@@ -1,5 +1,5 @@
 """Workflow session tracking for multi-step, multi-cohort analyses. Shared by
-all four servers in this repo -- each server supplies its own SessionConfig
+all five servers in this repo -- each server supplies its own SessionConfig
 (its own sessions directory and its own tool/stage/export-readiness mapping).
 
 A session groups a sequence of tool calls against one cohort/dataset so that:

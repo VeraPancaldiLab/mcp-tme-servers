@@ -1,6 +1,6 @@
 """Bioinfo-tools-server: MCP tools for general-purpose bulk RNAseq analysis
 
-Wraps every exported function in Bioinfo-tools' functions.r: TF-activity inference
+Wraps every exported function in the BioinfoTools R package: TF-activity inference
 (from gene expression (logTPM) or from a DEG signature with permutation p-values),
 decoupleR-scored pathway activity, edgeR/limma-voom differential expression with its
 volcano plot, ORA/GSEA enrichment (GO/KEGG/REACTOME/PROGENy/Hallmark), Kaplan-Meier
@@ -26,18 +26,16 @@ PROGENy's curated, signed pathway-responsive weights, and compute_enrichment's
 GO/KEGG/REACTOME/PROGENy/Hallmark databases, which are plain ORA/GSEA gene-set
 testing, not footprint inference at all.
 
-Unlike the other three servers in this package, Bioinfo-tools is not an installed R
-package (no DESCRIPTION/NAMESPACE) -- it's a single script, functions.r, meant to be
-source()'d. Each tool here still shells out to system R via the shared
-common/r_bridge.py dispatcher (common/r/run_tool.R), but in "source" mode rather than
-"package" mode: the script is source()'d fresh into its own environment for every call
-rather than looked up in an installed package's namespace. See
-common/paths.py:bioinfotools_script() for how its location is resolved (default
-~/Documents/Bioinfo-tools/functions.r, override with BIOINFOTOOLS_SCRIPT). All of
-functions.r's own R package dependencies (decoupleR, GSVA, edgeR, limma, clusterProfiler,
-ReactomePA, org.Hs.eg.db, EnhancedVolcano, survival, survminer, WGCNA, ADImpute, sva,
-ggpubr, ggstatsplot, ...) must already be installed in the system R library `Rscript`
-(on PATH) resolves to.
+Bioinfo-tools is an installed R package (`BioinfoTools`, from
+github.com/mhurtado13/Bioinfo-tools), like the other four servers in this
+package. Each tool here shells out to system R via the shared
+common/r_bridge.py dispatcher (common/r/run_tool.R), which installs
+`BioinfoTools` automatically the first time it's needed if it isn't already
+present (see this project's README). Its own R package dependencies
+(decoupleR, GSVA, edgeR, limma, clusterProfiler, ReactomePA, org.Hs.eg.db,
+EnhancedVolcano, survival, survminer, WGCNA, ADImpute, sva, ggpubr,
+ggstatsplot, ...) are pulled in as its declared Imports and installed
+alongside it.
 """
 
 from __future__ import annotations
@@ -49,7 +47,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from mcp_tme_servers.common.paths import bioinfotools_script, server_home
+from mcp_tme_servers.common.paths import server_home
 from mcp_tme_servers.common.r_bridge import (
     args_from,
     csv_arg,
@@ -74,8 +72,8 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "Bioinfo-tools-server",
     instructions=(
-        "General-purpose R functions for bulk RNAseq analysis, gathered in a single functions.r "
-        "file: transcription factor activity from expression (decoupleR-scored via "
+        "General-purpose R functions for bulk RNAseq analysis, gathered in the BioinfoTools "
+        "package: transcription factor activity from expression (decoupleR-scored via "
         "CollecTRI/Dorothea/ARACNE, compute_tf_activity, default statistic 'consensus' -- not "
         "VIPER, which is just one of several decoupleR statistics available) or from a DEG "
         "signature with permutation p-values "
@@ -179,7 +177,7 @@ SESSION_CONFIG = SessionConfig(
 )
 
 _run = make_run(runs_root=server_home("bioinfotools") / "runs")
-_SOURCE = str(bioinfotools_script())
+_PACKAGE = "BioinfoTools"
 
 register_session_tools(mcp, SESSION_CONFIG, domain="general-purpose bulk RNAseq analysis")
 
@@ -329,7 +327,7 @@ async def compute_tf_activity(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.TFs.activity", args=args, tool_name="compute_tf_activity",
+        package=_PACKAGE, function="compute.TFs.activity", args=args, tool_name="compute_tf_activity",
         ctx=ctx, timeout=900, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_tf_activity_diagnostics,
     )
@@ -437,7 +435,7 @@ async def compute_tf_activity_deg(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.TFs.activity.DEG", args=args, tool_name="compute_tf_activity_deg",
+        package=_PACKAGE, function="compute.TFs.activity.DEG", args=args, tool_name="compute_tf_activity_deg",
         ctx=ctx, timeout=1800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary={
             "activity": "Per-TF data frame: TF name, statistic score from the observed signature, and empirical (permutation-based) two-sided p-value, sorted by score descending.",
@@ -524,7 +522,7 @@ async def compute_pathway_activity(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.pathway.activity", args=args, tool_name="compute_pathway_activity",
+        package=_PACKAGE, function="compute.pathway.activity", args=args, tool_name="compute_pathway_activity",
         ctx=ctx, timeout=900, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
     )
 
@@ -574,7 +572,7 @@ async def run_deg_analysis(
         }
     )
     return await _run(
-        source=_SOURCE, function="run_deg_analysis", args=args, tool_name="run_deg_analysis",
+        package=_PACKAGE, function="run_deg_analysis", args=args, tool_name="run_deg_analysis",
         ctx=ctx, timeout=300, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_deg_diagnostics,
     )
@@ -665,7 +663,7 @@ async def compute_volcano_plot(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.volcano.plot", args=args, tool_name="compute_volcano_plot",
+        package=_PACKAGE, function="compute.volcano.plot", args=args, tool_name="compute_volcano_plot",
         ctx=ctx, timeout=300, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
     )
 
@@ -767,7 +765,7 @@ async def compute_enrichment(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.enrichment", args=args, tool_name="compute_enrichment",
+        package=_PACKAGE, function="compute.enrichment", args=args, tool_name="compute_enrichment",
         ctx=ctx, timeout=900, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_enrichment_diagnostics,
     )
@@ -841,7 +839,7 @@ async def compute_survival_analysis(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.survival.analysis", args=args, tool_name="compute_survival_analysis",
+        package=_PACKAGE, function="compute.survival.analysis", args=args, tool_name="compute_survival_analysis",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary={
             "km_plot": "The survminer::ggsurvplot object for the group_column comparison.",
@@ -897,7 +895,7 @@ async def compute_normalization(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.normalization", args=args, tool_name="compute_normalization",
+        package=_PACKAGE, function="compute.normalization", args=args, tool_name="compute_normalization",
         ctx=ctx, timeout=300, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
     )
 
@@ -945,7 +943,7 @@ async def compute_batch_correction(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.batch.correction", args=args, tool_name="compute_batch_correction",
+        package=_PACKAGE, function="compute.batch.correction", args=args, tool_name="compute_batch_correction",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
     )
 
@@ -987,7 +985,7 @@ async def compute_pca_analysis(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.pca.analysis", args=args, tool_name="compute_pca_analysis",
+        package=_PACKAGE, function="compute.pca.analysis", args=args, tool_name="compute_pca_analysis",
         ctx=ctx, timeout=300, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary={
             "pca": "The stats::prcomp object -- rotation/loadings and full component scores, for anything beyond PC1/PC2.",
@@ -1048,7 +1046,7 @@ async def compute_correlation(
         }
     )
     return await _run(
-        source=_SOURCE, function="compute.correlation", args=args, tool_name="compute_correlation",
+        package=_PACKAGE, function="compute.correlation", args=args, tool_name="compute_correlation",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary={
             "pearson": "Case 3 only: $cor and $pval matrices (features of x x features of y) for Pearson correlation.",
@@ -1093,7 +1091,7 @@ async def scores_pearson_test(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.pearson.test", args=args, tool_name="scores_pearson_test",
+        package=_PACKAGE, function="scores.pearson.test", args=args, tool_name="scores_pearson_test",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("Pearson"),
     )
@@ -1133,7 +1131,7 @@ async def scores_spearman_test(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.spearman.test", args=args, tool_name="scores_spearman_test",
+        package=_PACKAGE, function="scores.spearman.test", args=args, tool_name="scores_spearman_test",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("Spearman"),
     )
@@ -1175,7 +1173,7 @@ async def scores_fisher_test_continuous(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.fisher.test.continuous", args=args, tool_name="scores_fisher_test_continuous",
+        package=_PACKAGE, function="scores.fisher.test.continuous", args=args, tool_name="scores_fisher_test_continuous",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("Fisher's exact"),
     )
@@ -1228,7 +1226,7 @@ async def scores_stat_analysis(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.stat.analysis.continuous", args=args, tool_name="scores_stat_analysis",
+        package=_PACKAGE, function="scores.stat.analysis.continuous", args=args, tool_name="scores_stat_analysis",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("selected"),
     )
@@ -1269,7 +1267,7 @@ async def scores_ttest_test(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.ttest.test", args=args, tool_name="scores_ttest_test",
+        package=_PACKAGE, function="scores.ttest.test", args=args, tool_name="scores_ttest_test",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("t-test"),
     )
@@ -1309,7 +1307,7 @@ async def scores_wilcox_test(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.wilcox.test", args=args, tool_name="scores_wilcox_test",
+        package=_PACKAGE, function="scores.wilcox.test", args=args, tool_name="scores_wilcox_test",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("Wilcoxon"),
     )
@@ -1349,7 +1347,7 @@ async def scores_anova_test(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.anova.test", args=args, tool_name="scores_anova_test",
+        package=_PACKAGE, function="scores.anova.test", args=args, tool_name="scores_anova_test",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("ANOVA"),
     )
@@ -1388,7 +1386,7 @@ async def scores_kruskal_test(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.kruskal.test", args=args, tool_name="scores_kruskal_test",
+        package=_PACKAGE, function="scores.kruskal.test", args=args, tool_name="scores_kruskal_test",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("Kruskal-Wallis"),
     )
@@ -1442,7 +1440,7 @@ async def scores_stat_analysis_categorical(
         }
     )
     return await _run(
-        source=_SOURCE, function="scores.stat.analysis.categorical", args=args, tool_name="scores_stat_analysis_categorical",
+        package=_PACKAGE, function="scores.stat.analysis.categorical", args=args, tool_name="scores_stat_analysis_categorical",
         ctx=ctx, timeout=600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         diagnostics=_no_significant_features_diagnostics("selected"),
     )

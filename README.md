@@ -12,7 +12,7 @@ on your behalf, using the [Model Context Protocol](https://modelcontextprotocol.
 | pipeML | Training models to predict patient outcomes (e.g. treatment response) | [pipeML](https://github.com/VeraPancaldiLab/pipeML) (package) |
 | CellTFusion | Inferring Tumor-microenvironment (TME) states across patients | [CellTFusion](https://github.com/VeraPancaldiLab/CellTFusion) (package) |
 | RaCInG | Reconstructing how different cell types are signaling to each other | [RaCInG](https://github.com/VeraPancaldiLab/RaCInG_package) (package) |
-| Bioinfo-tools | General bioinformatic analysis | [Bioinfo-tools](https://github.com/mhurtado13/Bioinfo-tools) (script, `functions.r`) |
+| Bioinfo-tools | General bioinformatic analysis | [Bioinfo-tools](https://github.com/mhurtado13/Bioinfo-tools) (package, `BioinfoTools`) |
 
 ## Requirements
 
@@ -24,8 +24,8 @@ own R, to avoid version conflicts with other projects.
 
 ## Automatic R package installation
 
-`multideconv`, `pipeML`, `CellTFusion`, and `RaCInG` are installed
-automatically, on first use, if missing:
+`multideconv`, `pipeML`, `CellTFusion`, `RaCInG`, and `BioinfoTools` are
+installed automatically, on first use, if missing:
 
 | Package | Install command |
 |---|---|
@@ -33,6 +33,7 @@ automatically, on first use, if missing:
 | pipeML | `pak::pkg_install("VeraPancaldiLab/pipeML")` |
 | CellTFusion | `pak::pkg_install("VeraPancaldiLab/CellTFusion")` |
 | RaCInG | `remotes::install_github("VeraPancaldiLab/RaCInG_package")` |
+| BioinfoTools | `pak::pkg_install("mhurtado13/Bioinfo-tools")` |
 
 ## How it works
 

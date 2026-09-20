@@ -1,4 +1,4 @@
-"""Shared tool-building blocks used by all four servers in this repo: the
+"""Shared tool-building blocks used by all five servers in this repo: the
 generic `_run()` dispatcher wrapper, its result model, and the three
 session-management tools (registered once per server via
 `register_session_tools`).
@@ -115,8 +115,7 @@ def make_run(*, runs_root: Path) -> Callable:
 
     async def _run(
         *,
-        package: str | None = None,
-        source: str | None = None,
+        package: str,
         function: str,
         args: dict[str, dict],
         tool_name: str,
@@ -143,7 +142,6 @@ def make_run(*, runs_root: Path) -> Callable:
         try:
             result = await run_r_function(
                 package=package,
-                source=source,
                 function=function,
                 args=args,
                 tool_name=tool_name,

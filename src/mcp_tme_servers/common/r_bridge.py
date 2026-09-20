@@ -1,5 +1,5 @@
 """Subprocess bridge from Python MCP tools to R package functions. Shared by
-all four servers in this repo -- one dispatcher, one marshaling contract.
+all five servers in this repo -- one dispatcher, one marshaling contract.
 
 Each call shells out to `common/r/run_tool.R`, a generic dispatcher that
 loads one package, calls one exported function with JSON-described
@@ -137,8 +137,7 @@ def args_from(**kwargs: Any) -> dict[str, dict]:
 
 async def run_r_function(
     *,
-    package: str | None = None,
-    source: str | None = None,
+    package: str,
     function: str,
     args: dict[str, dict],
     tool_name: str,
@@ -149,10 +148,9 @@ async def run_r_function(
 ) -> dict:
     """Run one R package function via run_tool.R and return its parsed result dict.
 
-    Exactly one of `package` (an installed R package, looked up via
-    asNamespace()) or `source` (a standalone .r script, source()'d into its own
-    environment -- for Bioinfo-tools, which isn't an installed package) must be
-    given.
+    `package` is an installed R package, with `function` looked up in it via
+    asNamespace(). All five servers in this repo run this way (multideconv,
+    pipeML, CellTFusion, RaCInG, and BioinfoTools).
 
     Raises RToolError on a non-zero exit, a timeout, or an R-side error caught
     by run_tool.R's tryCatch (the R error message becomes the exception message).
@@ -169,9 +167,6 @@ async def run_r_function(
     overwritten by each subsequent call, so a downstream tool chaining off an
     earlier result.rds must run before the next call reuses that directory.
     """
-    if (package is None) == (source is None):
-        raise ValueError("run_r_function: exactly one of package or source must be given")
-
     if output_dir is not None:
         workdir = Path(output_dir).expanduser().resolve()
         workdir.mkdir(parents=True, exist_ok=True)
@@ -181,7 +176,7 @@ async def run_r_function(
         workdir = runs_root / run_id
         workdir.mkdir(parents=True, exist_ok=True)
 
-    manifest = {"package": package, "source": source, "function": function, "workdir": str(workdir), "args": args}
+    manifest = {"package": package, "function": function, "workdir": str(workdir), "args": args}
     manifest_path = workdir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
 
