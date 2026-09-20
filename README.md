@@ -1,9 +1,8 @@
 # mcp-tme-servers
 
 This project lets you ask an AI assistant to analyze your bulk
-RNAseq tumor-microenvironment (TME) data just by describing what you want in plain
-English, instead of writing code yourself. It does this by wrapping different
-advanced bioinformatic algorithms and packages that aim to characterize the TME that the AI can call
+RNAseq data and characterize the tumor-microenvironment (TME) of your samples 
+just by describing what you want in plain English, instead of writing complex code yourself. It does this by wrapping different advanced bioinformatic algorithms and packages that aim to characterize the TME that the AI can call
 on your behalf, using the [Model Context Protocol](https://modelcontextprotocol.io/)
 (MCP):
 
