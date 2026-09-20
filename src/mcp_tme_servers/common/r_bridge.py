@@ -61,9 +61,25 @@ def csv_list_arg(path: str, row_names: int | None = 1, as_matrix: bool = False) 
     return {"__type__": "csv_list", "path": _abs(path), "row_names": row_names, "as_matrix": as_matrix}
 
 
+def csv_rownames_arg(path: str) -> dict:
+    """A CSV's row names, read back as a plain character vector -- e.g. a DEG result's
+    gene symbols for compute.enrichment()'s `genes` (ORA) or `universe` argument.
+    """
+    return {"__type__": "csv_rownames", "path": _abs(path)}
+
+
 def rds_arg(path: str) -> dict:
     """A .rds file, read back with readRDS() (preserves full R object structure)."""
     return {"__type__": "rds", "path": _abs(path)}
+
+
+def path_arg(path: str) -> dict:
+    """A raw file path, absolutized against the caller's cwd, passed through as a
+    literal string -- for an argument the R function reads from disk itself (e.g. a
+    3-column ARACNE network.txt read via read.table()), unlike csv_arg/rds_arg, where
+    this bridge does the reading.
+    """
+    return {"__type__": "literal", "value": _abs(path)}
 
 
 def r_function_arg(name: str) -> dict:

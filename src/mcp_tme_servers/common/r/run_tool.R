@@ -16,6 +16,11 @@
 #     }
 #   }
 #
+# Other arg "__type__"s: "csv_column" (one named column, as a named vector),
+# "csv_list" (a CSV wrapped as list(df)), "csv_rownames" (a CSV's row names as
+# a plain character vector), "rds" (readRDS()'d as-is). See common/r_bridge.py
+# for the Python-side constructors.
+#
 # Exactly one of "package" (an installed R package, function looked up via
 # asNamespace()) or "source" (a standalone .r script, source()'d into its own
 # environment -- for Bioinfo-tools, which isn't an installed package) must be
@@ -76,6 +81,11 @@ resolve_arg <- function(spec) {
     df <- utils::read.csv(spec$path, row.names = row_names, check.names = FALSE)
     if (isTRUE(spec$as_matrix)) df <- as.matrix(df)
     return(list(df))
+  }
+
+  if (type == "csv_rownames") {
+    df <- utils::read.csv(spec$path, row.names = 1, check.names = FALSE)
+    return(rownames(df))
   }
 
   if (type == "rds") {

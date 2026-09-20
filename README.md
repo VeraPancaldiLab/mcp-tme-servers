@@ -191,13 +191,16 @@ even though they call it internally when given raw `counts`. Workaround
 (documented in both tools): call `prepare_racing_inputs` first and pass its
 result via `input_data_rds`.
 
-### Bioinfo-tools (14 tools: 13 analysis + session tools*)
+### Bioinfo-tools (21 tools: 18 analysis + session tools*)
 
 | Tool | R function |
 |---|---|
 | `compute_tf_activity` | `compute.TFs.activity` |
+| `compute_tf_activity_deg` | `compute.TFs.activity.DEG` |
 | `compute_pathway_activity` | `compute.pathway.activity` |
 | `run_deg_analysis` | `run_deg_analysis` |
+| `compute_volcano_plot` | `compute.volcano.plot` |
+| `compute_enrichment` | `compute.enrichment` |
 | `compute_survival_analysis` | `compute.survival.analysis` |
 | `compute_normalization` | `compute.normalization` |
 | `compute_batch_correction` | `compute.batch.correction` |
@@ -205,21 +208,38 @@ result via `input_data_rds`.
 | `compute_correlation` | `compute.correlation` |
 | `scores_pearson_test` | `scores.pearson.test` |
 | `scores_spearman_test` | `scores.spearman.test` |
-| `scores_kendall_test` | `scores.kendall.test` |
-| `scores_lm_test` | `scores.lm.test` |
 | `scores_fisher_test_continuous` | `scores.fisher.test.continuous` |
 | `scores_stat_analysis` | `scores.stat.analysis.continuous` |
+| `scores_ttest_test` | `scores.ttest.test` |
+| `scores_wilcox_test` | `scores.wilcox.test` |
+| `scores_anova_test` | `scores.anova.test` |
+| `scores_kruskal_test` | `scores.kruskal.test` |
+| `scores_stat_analysis_categorical` | `scores.stat.analysis.categorical` |
 
-\* 11 analysis tools plus the 3 session tools = 14; `scores_stat_analysis`
-above is itself a dispatcher over the five `scores_*_test` tools, so 13
-distinct analyses are exposed as 14 tool entry points.
+\* 18 analysis tools plus the 3 session tools = 21; `scores_stat_analysis`
+and `scores_stat_analysis_categorical` are themselves dispatchers over the
+three continuous and four categorical `scores_*_test` tools, respectively,
+so 16 distinct analyses are exposed as 18 tool entry points.
+
+IMPORTANT -- footprint methods: `compute_tf_activity`/`compute_tf_activity_deg`'s
+`tf_collection='CollecTRI'`/`'Dorothea'` and `compute_pathway_activity`'s default
+`pathway_source='PROGENy'` are this server's three FOOTPRINT-based databases (they
+score a regulator's activity from its curated targets'/responsive genes' expression,
+not the regulator's own expression). `tf_collection='ARACNE'` (a data-driven,
+per-cohort network) and `pathway_source='KEGG'/'REACTOME'/'Hallmark'` (unsigned
+MSigDB gene set collections) are the non-footprint alternatives; `compute_enrichment`'s
+GO/KEGG/REACTOME/PROGENy/Hallmark databases are plain ORA/GSEA gene-set testing, not
+footprint inference at all.
 
 Standalone utilities, not one fixed pipeline -- reach for whichever function
 fits the current step. `compute_normalization` typically runs first on raw
 counts, since `compute_tf_activity`/`compute_pathway_activity` expect
-already-normalized expression; results from any of these (or from
+already-normalized, log-scale expression (its `zscore` default is `False` for this
+reason); `run_deg_analysis`'s full signature (`pval=1`) feeds `compute_tf_activity_deg`
+or `compute_enrichment(method='GSEA')`, and its significant genes feed
+`compute_enrichment(method='ORA')`. Results from any of these (or from
 multideconv-server/CellTFusion-server/RaCInG-server) are typical inputs to
-`compute_survival_analysis` or the `scores_*`/`scores_stat_analysis`
+`compute_survival_analysis` or the `scores_*`/`scores_stat_analysis(_categorical)`
 trait-association tools. Export requires at least one analysis tool to have
 completed.
 
