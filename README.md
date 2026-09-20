@@ -2,7 +2,7 @@
 
 This project lets you ask an AI assistant to analyze your bulk
 RNAseq tumor-microenvironment (TME) data just by describing what you want in plain
-English, instead of writing R code yourself. It does this by wrapping different
+English, instead of writing code yourself. It does this by wrapping different
 advanced bioinformatic algorithms and packages that aim to characterize the TME that the AI can call
 on your behalf, using the [Model Context Protocol](https://modelcontextprotocol.io/)
 (MCP):
@@ -136,14 +136,15 @@ just this project.
 
 If you're not sure exactly which methods to cite, just ask the AI assistant!. For example:
 
-> **You:** "I finished my analysis, which methods or packages you used? What should I > cite in my project?"
+> **You:** "I finished my analysis, which methods or packages you used? What should I
+> cite in my project?"
 >
 > **AI:** "For this analysis, you should cite:
 >
 > - This toolkit: *XX, et al. (XX). mcp-tme-servers -- XX. XX.
 >   <https://doi.org/XX>*
-> - **multideconv** (the deconvolution pipeline): Hurtado, M., Essabbar, A.,
->   Khajavi, L., & Pancaldi, V. (2025). multideconv -- Integrative pipeline
+> - **multideconv** (the deconvolution pipeline): Hurtado, M., Khajavi, L.,
+>   Essabbar, A., & Pancaldi, V. (2025). multideconv -- Integrative pipeline
 >   for cell type deconvolution from bulk RNAseq using first and second
 >   generation methods. bioRxiv. <https://doi.org/10.1101/2025.04.29.651220>
 > - **omnideconv** (covering the deconvolution methods): Benchmarking 
