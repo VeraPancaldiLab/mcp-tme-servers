@@ -116,7 +116,11 @@ mcp = MCPServer(
         "mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference "
         "exists; check the project README for the current one) -- in addition to whichever "
         "specific decoupleR statistics/resources (e.g. CollecTRI, PROGENy, ARACNE) were "
-        "actually used."
+        "actually used. "
+        "IMPORTANT -- output location: once any tool call on this server finishes, always tell "
+        "the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were "
+        "saved) -- do not just use it silently to chain into the next call without also "
+        "surfacing it to the user."
     ),
 )
 
