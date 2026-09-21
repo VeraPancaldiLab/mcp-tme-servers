@@ -60,7 +60,7 @@ register_session_tools(mcp, SESSION_CONFIG, domain="ML/survival modeling")
 MLMetric = Literal["Accuracy", "AUROC", "AUPRC", "C-index"]
 
 _TRAINING_GLOSSARY = {
-    "Model": "The trained model object(s) -- or the meta-learner plus base models if stack=True.",
+    "Model": "The trained model object.",
     "Features": "The exact feature set used for training after pipeML's internal preprocessing (near-zero-variance removal, collinearity filtering, optional Boruta selection).",
     "CV_Results": "Cross-validated performance (metric per fold/repetition) from the repeated or LODO cross-validation -- this is the honest, leakage-free estimate of how the model would perform on unseen data from this cohort, not a training-set fit.",
     "AUROC_median": "Median AUROC across CV folds/repetitions -- discrimination between classes irrespective of a decision threshold. 0.5 = no better than chance, 1.0 = perfect separation.",
@@ -152,8 +152,7 @@ async def train_ml_model(
     trait_positive: Annotated[str | None, Field(description="Value in the target column that represents the positive class (e.g. 'Responder') -- determines which direction AUROC/AUPRC are computed in.")] = None,
     time_column: Annotated[str | None, Field(description="Column in target_csv with survival time (survival tasks).")] = None,
     event_column: Annotated[str | None, Field(description="Column in target_csv with the event indicator: 1 = event occurred (e.g. death, progression), 0 = censored (survival tasks).")] = None,
-    metric: Annotated[MLMetric | None, Field(description="Metric to optimize hyperparameter selection against. AUROC/AUPRC for imbalanced classification, Accuracy for balanced classification, C-index for survival.")] = None,
-    stack: Annotated[bool, Field(description="Ensemble-stack multiple base algorithms via a meta-learner instead of picking one best algorithm -- usually more robust, at the cost of interpretability and runtime.")] = False,
+    metric: Annotated[MLMetric | None, Field(description="Metric to optimize hyperparameter selection against. AUROC/AUPRC for imbalanced classification, Accuracy for balanced classification, C-index for survival. Leave unset for pipeML's own default (Accuracy).")] = None,
     k_folds: Annotated[int, Field(ge=2, description="Number of cross-validation folds.")] = 10,
     n_rep: Annotated[int, Field(ge=1, description="Number of repeated CV repetitions -- more repetitions give a more stable performance estimate at proportionally more compute.")] = 5,
     lodo: Annotated[bool, Field(description="Leave-one-dataset-out CV (stratified by batch_column) instead of random k-fold -- tests whether the model generalizes across cohorts/sequencing batches, a stronger check than random-split k-fold when you have multiple source cohorts.")] = False,
@@ -264,14 +263,8 @@ async def train_ml_model(
     RaCInG-server) and want an honest estimate of how well it predicts an outcome, without yet
     committing to a specific held-out test split.
 
-    This can be a slow call with many folds/repetitions, stacking enabled, or a
-    fold_construction_fun (which reruns feature construction per fold); progress is reported
-    periodically.
-
-    Known upstream issue: pass metric explicitly as "AUROC" or "AUPRC" for classification tasks.
-    Leaving metric unset (or "Accuracy") currently crashes inside pipeML itself with
-    `object 'hyperparams' not found` -- a bug in compute_features.training.ML, not in this
-    wrapper (see this server's README).
+    This can be a slow call with many folds/repetitions or a fold_construction_fun (which reruns
+    feature construction per fold); progress is reported periodically.
     """
     args = args_from(
         **{
@@ -282,7 +275,6 @@ async def train_ml_model(
             "time_var": csv_column_arg(target_csv, time_column) if (target_csv and time_column) else None,
             "event_var": csv_column_arg(target_csv, event_column) if (target_csv and event_column) else None,
             "metric": lit(metric) if metric else None,
-            "stack": lit(stack),
             "k_folds": lit(k_folds),
             "n_rep": lit(n_rep),
             "LODO": lit(lodo),
@@ -338,7 +330,6 @@ async def predict_ml_model(
     trait_positive: Annotated[str | None, Field(description="Value in the target column representing the positive class -- must match what train_ml_model used.")] = None,
     time_column: Annotated[str | None, Field(description="Column in target_csv with survival time (survival tasks).")] = None,
     event_column: Annotated[str | None, Field(description="Column in target_csv with the event indicator (survival tasks).")] = None,
-    stack: Annotated[bool, Field(description="Set True if model_rds was trained with stack=True (classification only) -- uses the meta-learner's predictions.")] = False,
     file_name: Annotated[str | None, Field(description="File name prefix for saved ROC/PRC/confusion-matrix or Kaplan-Meier plots.")] = None,
 ) -> RunResult:
     """Score a trained model against a held-out test set (pipeML::compute_prediction).
@@ -366,7 +357,6 @@ async def predict_ml_model(
             "task_type": lit(task_type),
             "time_var": csv_column_arg(target_csv, time_column) if (target_csv and time_column) else None,
             "event_var": csv_column_arg(target_csv, event_column) if (target_csv and event_column) else None,
-            "stack": lit(stack),
             "file.name": lit(file_name) if file_name else None,
             "return": lit(True),
         }

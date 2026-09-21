@@ -114,12 +114,12 @@ async def test_compute_shap_values(client: Client) -> None:
 
 
 @pytest.mark.anyio
-async def test_default_metric_surfaces_known_upstream_bug(client: Client) -> None:
-    # metric left unset -> pipeML's own default path -- currently broken upstream
-    # ("argument is of length zero"; metric="Accuracy" explicitly instead hits a
-    # related but distinct bug, "object 'hyperparams' not found" -- see README).
-    # Once fixed upstream and this repo's pinned pipeML version is bumped, this
-    # should start passing and can be simplified to a plain success assertion.
+async def test_default_metric_now_works(client: Client) -> None:
+    # metric left unset -> pipeML's own default ("Accuracy"). This used to crash
+    # upstream with "object 'hyperparams' not found" / "argument is of length
+    # zero"; confirmed fixed as of pipeML's current source (metric now defaults
+    # safely and is explicitly validated). If this starts failing again, check
+    # whether an older pipeML got reinstalled (see README/CLAUDE.md).
     result = await client.call_tool(
         "train_ml_model",
         {
@@ -132,8 +132,9 @@ async def test_default_metric_surfaces_known_upstream_bug(client: Client) -> Non
             "n_rep": 1,
         },
     )
-    assert result.is_error
-    assert "argument is of length zero" in result.content[0].text
+    assert not result.is_error
+    sc = result.structured_content
+    assert "AUROC_median" in sc["summary"]["names"]
 
 
 @pytest.mark.anyio

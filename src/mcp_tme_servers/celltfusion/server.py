@@ -17,7 +17,7 @@ from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from mcp_tme_servers.common.paths import server_home
-from mcp_tme_servers.common.r_bridge import args_from, csv_arg, lit
+from mcp_tme_servers.common.r_bridge import args_from, csv_arg, lit, rds_arg
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
     READ_ANNOTATIONS,
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "CellTFusion-server",
     instructions=(
-        "Tools for characterizing tumor-microenvironment cell states from bulk RNAseq by combining cell-type deconvolution with transcription-factor activity and co-regulation. run_celltfusion is a single, heavy call (WGCNA + GSVA + NMF) that returns cell-type proportions, TF activity scores, TF co-activity modules, pathway activity, composite cell-group scores, and NMF-derived latent factors annotated against TCGA meta-programs and Bagaev et al. TME (MFP) subtypes -- a broader state characterization than deconvolution alone. It can optionally take a precomputed deconvolution matrix (e.g. from this package's multideconv server) instead of recomputing it internally. "
+        "Tools for characterizing tumor-microenvironment cell states from bulk RNAseq by combining cell-type deconvolution with transcription-factor activity and co-regulation. run_celltfusion is a single, heavy call (WGCNA + GSVA + NMF) that returns cell-type proportions, TF activity scores, TF co-activity modules, pathway activity, composite cell-group scores, and NMF-derived latent factors annotated against TCGA meta-programs and Bagaev et al. TME (MFP) subtypes -- a broader state characterization than deconvolution alone. It can optionally take any of a precomputed raw deconvolution matrix, an already-harmonized cell-subgroup object, a TF activity matrix, or a pathway activity matrix (e.g. from this package's multideconv-server/bioinfotools-server, or a prior run_celltfusion call) instead of recomputing the corresponding step internally. "
         "IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to CellTFusion itself: Hurtado, M., & Pancaldi, V. (2026). CellTFusion: A transcriptional regulatory network framework for the identification of functional multicellular states from bulk RNA-seq data. bioRxiv. https://doi.org/10.64898/2026.06.30.735682 -- plus whichever other specific R packages/methods (e.g. WGCNA, the TF-target network used) were actually used."
     ),
 )
@@ -63,7 +63,8 @@ _CELLTFUSION_GLOSSARY = {
     "Deconvolution": (
         "Cell-type proportions (samples x cell types) from the internal deconvolution step -- "
         "the same kind of output multideconv-server's run_deconvolution produces, computed here "
-        "unless you passed deconv_csv."
+        "unless you passed deconv_csv (or dt_rds, in which case this is simply echoed from "
+        "deconv_csv if that was also given, or absent otherwise)."
     ),
     "TFs_matrix": (
         "Transcription factor activity scores (samples x TFs), inferred from expression via the "
@@ -133,16 +134,74 @@ async def run_celltfusion(
     ctx: Context,
     output_dir: OutputDir = None,
     session_id: SessionIdParam = None,
-    deconv_csv: Annotated[str | None, Field(description="Optional precomputed deconvolution matrix CSV (e.g. from multideconv-server's run_deconvolution); computed internally via multideconv if omitted, which is slower but self-contained.")] = None,
+    deconv_csv: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional precomputed RAW (unharmonized) deconvolution matrix CSV (e.g. from "
+                "multideconv-server's run_deconvolution) -- skips the internal deconvolution step "
+                "only; harmonization (cross-method subgroup analysis) still runs on it. Computed "
+                "internally via multideconv if omitted, which is slower but self-contained. For "
+                "an ALREADY-harmonized cell-subgroup object that skips both steps, use dt_rds "
+                "instead."
+            )
+        ),
+    ] = None,
+    dt_rds: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional precomputed, ALREADY-HARMONIZED cell-subgroup object -- typically "
+                "multideconv-server's analyze_deconvolution result.rds, or a prior "
+                "run_celltfusion call's own Processed_deconvolution element written to its own "
+                ".rds. Skips BOTH the internal deconvolution AND harmonization steps entirely, "
+                "going straight to cell-group construction. If both dt_rds and deconv_csv are "
+                "given, only dt_rds is actually used for computation -- deconv_csv is merely "
+                "echoed into the result's own Deconvolution field, not recomputed or reharmonized."
+            )
+        ),
+    ] = None,
+    tfs_csv: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional precomputed TF activity matrix CSV (samples as rows, TFs as columns) -- "
+                "typically a prior run_celltfusion call's TFs_matrix, or bioinfotools-server's "
+                "compute_tf_activity output. Skips the internal TF activity inference step."
+            )
+        ),
+    ] = None,
+    pathways_csv: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional precomputed pathway activity matrix CSV (samples as rows, pathways as "
+                "columns) -- typically a prior run_celltfusion call's Pathways_scores, or "
+                "bioinfotools-server's compute_pathway_activity output. Skips the internal "
+                "pathway activity inference step."
+            )
+        ),
+    ] = None,
+    universe_csv: Annotated[
+        str | None,
+        Field(description="Optional user-supplied TF-target network CSV (source/target columns) for the internal TF activity step, instead of fetching tf_collection. Ignored if tfs_csv is given.")
+    ] = None,
+    paths_csv: Annotated[
+        str | None,
+        Field(description="Optional PROGENy pathway-gene weight table CSV (source/target/weight columns) for the internal pathway activity step, instead of fetching the bundled human PROGENy resource. Ignored if pathways_csv is given.")
+    ] = None,
+    gene_sets_rds: Annotated[
+        str | None,
+        Field(description="Optional .rds holding a named list of custom gene sets (character vectors of gene symbols) additionally scored via GSVA during the internal pathway activity step. Ignored if pathways_csv is given.")
+    ] = None,
     normalized: Annotated[bool, Field(description="Set False if raw_counts_csv already holds log-TPM normalized values instead of raw counts.")] = True,
-    coldata_csv: Annotated[str | None, Field(description="Optional clinical/sample metadata CSV, samples as rows, needed for supervised DEG analysis (contrast_column) or downstream trait/survival association.")] = None,
+    coldata_csv: Annotated[str | None, Field(description="Optional clinical/sample metadata CSV, samples as rows, needed for batch mode (batch_column) or downstream trait association with TF modules.")] = None,
     batch: Annotated[bool, Field(description="Run in multi-cohort/batch mode, aligning cell groups and factors across cohorts rather than treating all samples as one uniform batch.")] = False,
     batch_column: Annotated[str | None, Field(description="Column in coldata_csv identifying each sample's cohort, if batch=True.")] = None,
-    deconv_methods: Annotated[list[str], Field(description="Deconvolution methods to run internally if deconv_csv is not supplied.")] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS"],
+    deconv_methods: Annotated[list[str], Field(description="Deconvolution methods to run internally if deconv_csv/dt_rds are not supplied.")] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS"],
+    cbsx_mail: Annotated[str | None, Field(description="CIBERSORTx account email, required (with cbsx_token) if 'CBSX' is included in deconv_methods.")] = None,
+    cbsx_token: Annotated[str | None, Field(description="CIBERSORTx API token, required (with cbsx_mail) if 'CBSX' is included in deconv_methods.")] = None,
     file_name: Annotated[str | None, Field(description="File name prefix for outputs (plots, module matrices) saved under run_dir/Results.")] = None,
-    task: Annotated[Literal["supervised", "unsupervised"], Field(description="'unsupervised' (default) derives cell states purely from data structure. 'supervised' additionally runs differential-expression analysis contrasting groups defined by contrast_column/ref_level.")] = "unsupervised",
-    contrast_column: Annotated[str | None, Field(description="Column in coldata_csv defining condition groups, for supervised DEG analysis.")] = None,
-    ref_level: Annotated[str | None, Field(description="Reference level of contrast_column for supervised DEG analysis (the 'baseline' group DEG is computed against).")] = None,
     tf_collection: Annotated[
         Literal["CollecTRI", "Dorothea", "ARACNE"],
         Field(
@@ -194,9 +253,11 @@ async def run_celltfusion(
 
     WHEN: use this when you want a broader tumor-microenvironment state characterization than
     deconvolution alone -- e.g. distinguishing an immune-enriched-but-suppressed TME from a
-    genuinely immune-active one, which raw cell-type fractions can't do by themselves. Pass
-    deconv_csv (e.g. from multideconv-server's run_deconvolution) if you already have a trusted,
-    harmonized deconvolution result -- otherwise this recomputes deconvolution internally.
+    genuinely immune-active one, which raw cell-type fractions can't do by themselves. Any of
+    deconv_csv/dt_rds/tfs_csv/pathways_csv can be passed to skip the corresponding internal step
+    and reuse a trusted precomputed result instead (e.g. from multideconv-server or
+    bioinfotools-server) -- otherwise each step is recomputed internally, which is slower but
+    self-contained.
 
     Returns a list with 10 elements (see field_glossary). This is the heaviest tool on this
     server (WGCNA + GSVA + NMF); progress is reported periodically. cancer_type is required for
@@ -206,15 +267,20 @@ async def run_celltfusion(
         **{
             "raw.counts": csv_arg(raw_counts_csv, row_names=1, as_matrix=True),
             "deconv": csv_arg(deconv_csv, row_names=1) if deconv_csv else None,
+            "dt": rds_arg(dt_rds) if dt_rds else None,
+            "tfs": csv_arg(tfs_csv, row_names=1) if tfs_csv else None,
+            "pathways": csv_arg(pathways_csv, row_names=1) if pathways_csv else None,
+            "universe": csv_arg(universe_csv, row_names=None) if universe_csv else None,
+            "paths": csv_arg(paths_csv, row_names=None) if paths_csv else None,
+            "gene_sets": rds_arg(gene_sets_rds) if gene_sets_rds else None,
             "normalized": lit(normalized),
             "coldata": csv_arg(coldata_csv, row_names=1) if coldata_csv else None,
             "batch": lit(batch),
             "batch_id": lit(batch_column) if batch_column else None,
             "deconv_methods": lit(deconv_methods),
+            "cbsx.mail": lit(cbsx_mail) if cbsx_mail else None,
+            "cbsx.token": lit(cbsx_token) if cbsx_token else None,
             "file_name": lit(file_name) if file_name else None,
-            "task": lit(task),
-            "contrast": lit(contrast_column) if contrast_column else None,
-            "ref_level": lit(ref_level) if ref_level else None,
             "TF.collection": lit(tf_collection),
             "min_targets_size": lit(min_targets_size),
             "minMod": lit(min_module_size),

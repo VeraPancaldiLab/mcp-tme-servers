@@ -103,10 +103,7 @@ push to one of the five upstream repos requires manually reinstalling it.
 
 ### Known upstream bugs are documented, not patched
 
-When a wrapped R package has a real bug (e.g. pipeML's
-`compute_features.training.ML`/`compute_k_fold_CV` reading `hyperparams`
-outside the branch that sets it when `metric` isn't `"AUROC"`/`"AUPRC"`; the
-now-deleted `compute_features.ML`'s undeclared `fold_models_dir` reference;
+When a wrapped R package has a real bug (currently:
 `multideconv::prepare_multideconv_folds()`'s per-fold branch never
 `return()`-ing its computed folds), this repo documents the bug in the
 tool's own docstring and the README rather than patching the upstream
@@ -115,3 +112,17 @@ for "Known upstream issue" and "TEMP" across `server.py`/README when
 touching a tool that has one; a `TEMP` marker specifically means a fix is
 expected soon (the multideconv `prepare_multideconv_folds` one) and should
 be removed once confirmed fixed upstream, not treated as permanent.
+
+pipeML's earlier `hyperparams`-not-found bug (crashing any
+`compute_features.training.ML` call whose `metric` wasn't `"AUROC"`/
+`"AUPRC"`) and the now-deleted `compute_features.ML`'s undeclared
+`fold_models_dir` reference were both confirmed fixed upstream as of the
+last check of `/home/marcelo.hurtado/Documents/pipeML` -- `metric` now
+defaults safely to `"Accuracy"` with an explicit validation `stop()` for
+truly invalid values. Also note: pipeML removed model **stacking** entirely
+(the `stack` parameter no longer exists on `compute_features.training.ML`
+or `compute_prediction`) -- this repo's `train_ml_model`/`predict_ml_model`
+no longer expose it, matching current upstream. If either package is
+reinstalled to a version predating these changes, these tools would break
+again (missing/unused-argument errors) -- see "R package installation"
+above for why that can happen silently.
