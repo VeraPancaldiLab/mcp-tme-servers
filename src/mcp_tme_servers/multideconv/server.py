@@ -202,19 +202,21 @@ async def run_deconvolution(
                 "as good as how well the signature matches this cohort's tissue/technology. "
                 "Running several methods (the default) is the point: agreement across methods "
                 "is what analyze_deconvolution uses to identify trustworthy cell subgroups "
-                "versus method-specific artifacts. CIBERSORTx (CBSX) is omitted from the default "
-                "set as it needs separate Docker credentials -- pass credentials_mail and "
-                "credentials_token (and include \"CBSX\" here) to run it."
+                "versus method-specific artifacts. CIBERSORTx (CBSX) IS part of the default set "
+                "-- but it needs separate Docker credentials (credentials_mail + "
+                "credentials_token) to actually run, which cannot be supplied automatically. "
+                "See this tool's docstring for the credential-gathering step required before "
+                "calling with CBSX included."
             )
         ),
-    ] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS"],
+    ] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS", "CBSX"],
     credentials_mail: Annotated[
         str | None,
-        Field(description="CIBERSORTx account email, required (with credentials_token) to run the CBSX method. Get one at cibersortx.stanford.edu."),
+        Field(description="CIBERSORTx account email, required (with credentials_token) to run the CBSX method (included in methods by default). Register for free at https://cibersortx.stanford.edu if the user doesn't already have an account."),
     ] = None,
     credentials_token: Annotated[
         str | None,
-        Field(description="CIBERSORTx API token, required (with credentials_mail) to run the CBSX method. Stored in this session's manifest.json for the R subprocess to read, but masked out of the session's exported reproducibility log."),
+        Field(description="CIBERSORTx API token, required (with credentials_mail) to run the CBSX method (included in methods by default). Get it from the account's settings at https://cibersortx.stanford.edu. Stored in this session's manifest.json for the R subprocess to read, but masked out of the session's exported reproducibility log."),
     ] = None,
     signatures_select: Annotated[
         list[str] | None,
@@ -319,6 +321,23 @@ async def run_deconvolution(
     where those files are and pass their paths via custom_signature_files; do not place or copy
     them anywhere yourself outside of that parameter -- see its own description for why a fixed
     folder matters here.
+
+    CIBERSORTx (CBSX) credentials: CBSX is part of the default `methods` set, but it is the one
+    method here that needs a CIBERSORTx Docker account -- credentials_mail and credentials_token
+    -- which nothing in this pipeline can supply on its own. Before calling this tool with CBSX
+    still in `methods` (i.e. whenever the caller hasn't deliberately removed it), ask the user
+    for their CIBERSORTx email and API token.
+      - If they already have credentials, pass them via credentials_mail/credentials_token and
+        keep CBSX in methods.
+      - If they don't, tell them to register a free account and generate a token at
+        https://cibersortx.stanford.edu, then offer two options and let the user pick:
+        (1) run now with CBSX excluded from methods (the other first-generation methods are
+        unaffected -- CBSX only adds one more method's worth of agreement signal), or
+        (2) wait until they have the credentials and call this tool then, with CBSX left in
+        methods and credentials_mail/credentials_token filled in.
+      - Don't silently drop CBSX and don't silently run without asking -- CBSX being in the
+        default set is intentional and should stay the default whenever credentials are or
+        become available.
 
     Returns a samples x features matrix of cell-type proportions.
     """
