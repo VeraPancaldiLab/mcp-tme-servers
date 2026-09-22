@@ -34,7 +34,8 @@ mcp = MCPServer(
     "CellTFusion-server",
     instructions=(
         "Tools for characterizing tumor-microenvironment cell states from bulk RNAseq by combining cell-type deconvolution with transcription-factor activity and co-regulation. run_celltfusion is a single, heavy call (WGCNA + GSVA + NMF) that returns cell-type proportions, TF activity scores, TF co-activity modules, pathway activity, composite cell-group scores, and NMF-derived latent factors annotated against TCGA meta-programs and Bagaev et al. TME (MFP) subtypes -- a broader state characterization than deconvolution alone. It can optionally take any of a precomputed raw deconvolution matrix, an already-harmonized cell-subgroup object, a TF activity matrix, or a pathway activity matrix (e.g. from this package's multideconv-server/bioinfotools-server, or a prior run_celltfusion call) instead of recomputing the corresponding step internally. "
-        "IMPORTANT -- this server is NOT a downstream step of multideconv-server and does not require it to have been run first: run_celltfusion computes its own deconvolution, TF activity, and pathway activity internally by default. multideconv-server and this server answer different questions -- multideconv-server answers \"what cell types, and how much of each, are in this sample\" (composition/proportions only); this server answers \"what regulatory/functional TME state is this sample in\" (composition combined with TF activity and co-regulation -- TME states, cell niches, immune-active vs -suppressed, etc.). Pick the server based on which question the user is actually asking, and do not assume the user wants both run in sequence just because they asked for one. That said, if any of these have genuinely already been computed for this same cohort (e.g. a harmonized deconvolution result from multideconv-server's analyze_deconvolution, or a TF/pathway activity matrix from bioinfotools-server or a prior run_celltfusion call), it IS worth reusing them via dt_rds/tfs_csv/pathways_csv (or the unharmonized deconv_csv) to avoid recomputing that step -- this is a real efficiency option, not something to avoid, it's just never a prerequisite you need to go create first. "
+        "IMPORTANT -- this server is NOT a downstream step of multideconv-server and does not require it to have been run first: run_celltfusion computes its own deconvolution, TF activity, and pathway activity internally by default. multideconv-server and this server answer different questions -- multideconv-server answers \"what cell types, and how much of each, are in this sample\" (composition/proportions only); this server answers \"what regulatory/functional TME state is this sample in\" (composition combined with TF activity and co-regulation -- TME niches, functional polarization, etc.). IMPORTANT -- immune infiltration is a composition/proportions question (how much immune cell content is present), so it belongs to multideconv-server, NOT here -- do not treat \"is this patient immune infiltrated\" as a reason to reach for this server. This server is for a different, narrower question that goes beyond raw infiltration: the functional/regulatory state of the TME once composition is known (e.g. immune-active vs -suppressed polarization, co-regulation modules, MFP subtypes) -- \"state\" here means regulatory activity, not the presence/amount of cell types. Pick the server based on which question the user is actually asking, and do not assume the user wants both run in sequence just because they asked for one. That said, if any of these have genuinely already been computed for this same cohort (e.g. a harmonized deconvolution result from multideconv-server's analyze_deconvolution, or a TF/pathway activity matrix from bioinfotools-server or a prior run_celltfusion call), it IS worth reusing them via dt_rds/tfs_csv/pathways_csv (or the unharmonized deconv_csv) to avoid recomputing that step -- this is a real efficiency option, not something to avoid, it's just never a prerequisite you need to go create first. "
+        "IMPORTANT -- CBSX default: when run_celltfusion runs its own internal deconvolution (deconv_csv/dt_rds not supplied), CIBERSORTx (CBSX) IS part of the default deconv_methods set here, same as multideconv-server's run_deconvolution. Ask the user for their CIBERSORTx credentials (cbsx_mail/cbsx_token) the same way as for multideconv-server -- if they have an account, pass the credentials and keep CBSX in deconv_methods; if they say they don't have credentials, omit CBSX from deconv_methods and run without it rather than blocking or asking again. See run_celltfusion's own docstring for the full credential-gathering flow (including pointing the user to https://cibersortx.stanford.edu to register). "
         "IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to CellTFusion itself: Hurtado, M., & Pancaldi, V. (2026). CellTFusion: A transcriptional regulatory network framework for the identification of functional multicellular states from bulk RNA-seq data. bioRxiv. https://doi.org/10.64898/2026.06.30.735682 -- plus whichever other specific R packages/methods (e.g. WGCNA, the TF-target network used) were actually used. "
         "IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user."
     ),
@@ -200,9 +201,20 @@ async def run_celltfusion(
     coldata_csv: Annotated[str | None, Field(description="Optional clinical/sample metadata CSV, samples as rows, needed for batch mode (batch_column) or downstream trait association with TF modules.")] = None,
     batch: Annotated[bool, Field(description="Run in multi-cohort/batch mode, aligning cell groups and factors across cohorts rather than treating all samples as one uniform batch.")] = False,
     batch_column: Annotated[str | None, Field(description="Column in coldata_csv identifying each sample's cohort, if batch=True.")] = None,
-    deconv_methods: Annotated[list[str], Field(description="Deconvolution methods to run internally if deconv_csv/dt_rds are not supplied.")] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS"],
-    cbsx_mail: Annotated[str | None, Field(description="CIBERSORTx account email, required (with cbsx_token) if 'CBSX' is included in deconv_methods.")] = None,
-    cbsx_token: Annotated[str | None, Field(description="CIBERSORTx API token, required (with cbsx_mail) if 'CBSX' is included in deconv_methods.")] = None,
+    deconv_methods: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Deconvolution methods to run internally if deconv_csv/dt_rds are not supplied. "
+                "CIBERSORTx (CBSX) IS part of the default set (matching multideconv-server's "
+                "run_deconvolution), but it needs separate Docker credentials (cbsx_mail + "
+                "cbsx_token) to actually run -- see this tool's docstring for the "
+                "credential-gathering step required before calling with CBSX included."
+            )
+        ),
+    ] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS", "CBSX"],
+    cbsx_mail: Annotated[str | None, Field(description="CIBERSORTx account email, required (with cbsx_token) to run the CBSX method (included in deconv_methods by default). Register for free at https://cibersortx.stanford.edu if the user doesn't already have an account.")] = None,
+    cbsx_token: Annotated[str | None, Field(description="CIBERSORTx API token, required (with cbsx_mail) to run the CBSX method (included in deconv_methods by default). Get it from the account's settings at https://cibersortx.stanford.edu.")] = None,
     file_name: Annotated[str | None, Field(description="File name prefix for outputs (plots, module matrices) saved under run_dir/Results.")] = None,
     tf_collection: Annotated[
         Literal["CollecTRI", "Dorothea", "ARACNE"],
@@ -260,6 +272,24 @@ async def run_celltfusion(
     and reuse a trusted precomputed result instead (e.g. from multideconv-server or
     bioinfotools-server) -- otherwise each step is recomputed internally, which is slower but
     self-contained.
+
+    CIBERSORTx (CBSX) credentials: if deconv_csv/dt_rds are NOT supplied, this tool runs its own
+    internal deconvolution (multideconv::compute.deconvolution under the hood), and CBSX is part
+    of the default deconv_methods set here too -- matching multideconv-server's run_deconvolution.
+    CBSX is the one method that needs a CIBERSORTx Docker account (cbsx_mail + cbsx_token), which
+    nothing in this pipeline can supply on its own. Before calling this tool with CBSX still in
+    deconv_methods and no deconv_csv/dt_rds supplied, ask the user for their CIBERSORTx email and
+    API token, exactly as for multideconv-server's run_deconvolution:
+      - If they already have credentials, pass them via cbsx_mail/cbsx_token and keep CBSX in
+        deconv_methods.
+      - If they don't, tell them to register a free account and generate a token at
+        https://cibersortx.stanford.edu, then offer two options and let the user pick: (1) run
+        now with CBSX excluded from deconv_methods, or (2) wait until they have the credentials
+        and call this tool then, with CBSX left in deconv_methods and cbsx_mail/cbsx_token filled
+        in.
+      - Don't silently drop CBSX and don't silently run without asking. This entire step is
+        unnecessary (and these two params are ignored) whenever deconv_csv or dt_rds is supplied,
+        since no internal deconvolution runs in that case.
 
     Returns a list with 10 elements (see field_glossary). This is the heaviest tool on this
     server (WGCNA + GSVA + NMF); progress is reported periodically. cancer_type is required for
