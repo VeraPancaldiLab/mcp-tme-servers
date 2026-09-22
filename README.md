@@ -44,46 +44,61 @@ writing or running any code yourself.
 
 ## Installation
 
-### Run from source with uv (current setup)
+### 1. Install `uv`
+
+`uv` is the Python package/dependency manager this project uses; it also
+fetches a matching Python interpreter (>= 3.12) automatically if your system
+doesn't have one.
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+(Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`.)
+
+### 2. Clone the repo
+
+```bash
+git clone https://github.com/mhurtado13/mcp-tme-servers.git
+cd mcp-tme-servers
+```
+
+### 3. Install Python dependencies
 
 ```bash
 uv sync
+```
+
+### 4. (Optional) Run the test suite
+
+```bash
 uv run pytest        # regression tests against each package's own example data
 ```
 
+This shells out to real R and will auto-install any of the five R packages
+that are still missing (see "Automatic R package installation" above), so
+the first run is slower and needs internet access, R itself must already be
+on `PATH`, and `pak`/`remotes` don't need to be installed beforehand -- they
+get bootstrapped automatically too if missing.
+
+### 6. Register with Claude Code
+
+Replace `/path/to/mcp-tme-servers` below with wherever you cloned the repo
+in step 2 (e.g. the output of `pwd` if you're still in that directory).
+
 ```bash
-uv run mcp-multideconv-server
-uv run mcp-pipeml-server
-uv run mcp-celltfusion-server
-uv run mcp-racing-server
-uv run mcp-bioinfotools-server
+claude mcp add multideconv-server --scope user -- uv --directory /path/to/mcp-tme-servers run mcp-multideconv-server
+claude mcp add pipeML-server --scope user -- uv --directory /path/to/mcp-tme-servers run mcp-pipeml-server
+claude mcp add CellTFusion-server --scope user -- uv --directory /path/to/mcp-tme-servers run mcp-celltfusion-server
+claude mcp add RaCInG-server --scope user -- uv --directory /path/to/mcp-tme-servers run mcp-racing-server
+claude mcp add Bioinfo-tools-server --scope user -- uv --directory /path/to/mcp-tme-servers run mcp-bioinfotools-server
 ```
 
-### Register with Claude Code
+`--scope user` registers each server for every Claude Code session on this
+machine (not just when run from inside this repo's directory). Verify with
+`claude mcp list`, or `/mcp` inside a Claude Code session.
 
-```bash
-claude mcp add multideconv-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-multideconv-server
-claude mcp add pipeML-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-pipeml-server
-claude mcp add CellTFusion-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-celltfusion-server
-claude mcp add RaCInG-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-racing-server
-claude mcp add Bioinfo-tools-server --scope user -- uv --directory /home/marcelo.hurtado/Documents/mcp-tme-servers run mcp-bioinfotools-server
-```
-
-## Configure an MCP client generically
-
-```jsonc
-{
-  "servers": {
-    "multideconv":   { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-multideconv-server"] },
-    "pipeml":        { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-pipeml-server"] },
-    "celltfusion":   { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-celltfusion-server"] },
-    "racing":        { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-racing-server"] },
-    "bioinfotools":  { "type": "stdio", "command": "uv", "args": ["--directory", "/path/to/mcp-tme-servers", "run", "mcp-bioinfotools-server"] }
-  }
-}
-```
-
-## How to ask? Here some examples
+## What and how to ask? Here some examples
 
 - "I have RNA-seq counts from 40 tumor samples in tumor_counts.csv. Can you estimate how much of each immune and stromal cell type is present in each sample?"
 
