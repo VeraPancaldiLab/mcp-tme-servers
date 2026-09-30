@@ -10,10 +10,13 @@ library `Rscript` (on PATH) resolves to.
 from __future__ import annotations
 
 import logging
+import shutil
+from pathlib import Path
 from typing import Annotated, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from mcp_tme_servers.common.paths import server_home
@@ -26,6 +29,7 @@ from mcp_tme_servers.common.tools import (
     SessionIdParam,
     make_run,
     register_session_tools,
+    resolve_output_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,7 +40,7 @@ mcp = MCPServer(
         "Tools for characterizing tumor-microenvironment cell states from bulk RNAseq by combining cell-type deconvolution with transcription-factor activity and co-regulation. run_celltfusion is a single, heavy call (WGCNA + GSVA + NMF) that returns cell-type proportions, TF activity scores, TF co-activity modules, pathway activity, composite cell-group scores, and NMF-derived latent factors annotated against TCGA meta-programs and Bagaev et al. TME (MFP) subtypes -- a broader state characterization than deconvolution alone. It can optionally take any of a precomputed raw deconvolution matrix, an already-harmonized cell-subgroup object, a TF activity matrix, or a pathway activity matrix (e.g. from this package's multideconv-server/bioinfotools-server, or a prior run_celltfusion call) instead of recomputing the corresponding step internally. "
         "IMPORTANT -- this server is NOT a downstream step of multideconv-server and does not require it to have been run first: run_celltfusion computes its own deconvolution, TF activity, and pathway activity internally by default. multideconv-server and this server answer different questions -- multideconv-server answers \"what cell types, and how much of each, are in this sample\" (composition/proportions only); this server answers \"what regulatory/functional TME state is this sample in\" (composition combined with TF activity and co-regulation -- TME niches, functional polarization, etc.). IMPORTANT -- immune infiltration is a composition/proportions question (how much immune cell content is present), so it belongs to multideconv-server, NOT here -- do not treat \"is this patient immune infiltrated\" as a reason to reach for this server. This server is for a different, narrower question that goes beyond raw infiltration: the functional/regulatory state of the TME once composition is known (e.g. immune-active vs -suppressed polarization, co-regulation modules, MFP subtypes) -- \"state\" here means regulatory activity, not the presence/amount of cell types. Pick the server based on which question the user is actually asking, and do not assume the user wants both run in sequence just because they asked for one. "
         "IMPORTANT -- check for existing inputs before recomputing: before running run_celltfusion, proactively check whether any of its expensive internal steps (deconvolution, harmonized deconvolution subgroups, TF activity, pathway activity) have already been computed for this same cohort -- e.g. a deconvolution/harmonized-subgroup result from multideconv-server's run_deconvolution/analyze_deconvolution, a TF or pathway activity matrix from bioinfotools-server, or the output of a prior run_celltfusion call. Look for these via that server's get_session_status/prior sessions for the same input data, or by asking the user whether they already have one. If you locate a candidate, do not pass it in silently -- ask the user to confirm it's the right one for this cohort before using it via deconv_csv/dt_rds/tfs_csv/pathways_csv. If the user doesn't confirm it (or none is found), recompute that step from scratch internally rather than guessing. This reuse is a real efficiency option, not something to avoid, it's just never a prerequisite you need to go create first, and never something to assume without the user's confirmation. "
-        "IMPORTANT -- CBSX default: when run_celltfusion runs its own internal deconvolution (deconv_csv/dt_rds not supplied), CIBERSORTx (CBSX) IS part of the default deconv_methods set here, same as multideconv-server's run_deconvolution. Ask the user for their CIBERSORTx credentials (cbsx_mail/cbsx_token) the same way as for multideconv-server -- if they have an account, pass the credentials and keep CBSX in deconv_methods; if they say they don't have credentials, omit CBSX from deconv_methods and run without it rather than blocking or asking again. See run_celltfusion's own docstring for the full credential-gathering flow (including pointing the user to https://cibersortx.stanford.edu to register). "
+        "IMPORTANT -- CBSX: when run_celltfusion runs its own internal deconvolution (deconv_csv/dt_rds not supplied), CIBERSORTx (CBSX) is NOT in the default deconv_methods (matching CellTFusion itself, unlike multideconv-server's run_deconvolution). If the user wants CBSX included, ask for their CIBERSORTx credentials (cbsx_mail/cbsx_token; free registration at https://cibersortx.stanford.edu) and add 'CBSX' to deconv_methods -- CellTFusion stops without credentials, so the call is rejected up front. "
         "IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to CellTFusion itself: Hurtado, M., & Pancaldi, V. (2026). CellTFusion: A transcriptional regulatory network framework for the identification of functional multicellular states from bulk RNA-seq data. bioRxiv. https://doi.org/10.64898/2026.06.30.735682 -- plus whichever other specific R packages/methods (e.g. WGCNA, the TF-target network used) were actually used. "
         "IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user."
     ),
@@ -68,13 +72,14 @@ _CELLTFUSION_GLOSSARY = {
         "Cell-type proportions (samples x cell types) from the internal deconvolution step -- "
         "the same kind of output multideconv-server's run_deconvolution produces, computed here "
         "unless you passed deconv_csv (or dt_rds, in which case this is simply echoed from "
-        "deconv_csv if that was also given, or absent otherwise)."
+        "deconv_csv if that was also given, or NULL otherwise)."
     ),
     "TFs_matrix": (
         "Transcription factor activity scores (samples x TFs), inferred from expression via the "
         "chosen TF.collection regulon network (decoupleR consensus methods). Higher = that TF's "
         "target genes show more coordinated up-regulation in that sample, i.e. the TF is inferred "
-        "to be more active, not necessarily more highly expressed itself."
+        "to be more active, not necessarily more highly expressed itself. In batch mode, a list "
+        "of such matrices, one per cohort."
     ),
     "TF_network": (
         "The WGCNA TF co-activity module structure: which TFs cluster into the same module "
@@ -108,11 +113,12 @@ _CELLTFUSION_GLOSSARY = {
     "TME_states": (
         "Each latent factor annotated against Bagaev et al. (2021) Molecular Functional Portrait "
         "(MFP) TME subtypes (e.g. immune-enriched, fibrotic, desert) and/or derived meta-programs "
-        "-- the closest this pipeline comes to a single biological label per factor."
+        "-- the closest this pipeline comes to a single biological label per factor. NULL when "
+        "cancer_type wasn't given (the meta-program mapping step is skipped)."
     ),
     "Metaprograms_reference": (
         "The TCGA-derived meta-program reference used for TME_states annotation, for the given "
-        "cancer_type."
+        "cancer_type (NULL without one)."
     ),
 }
 
@@ -188,7 +194,7 @@ async def run_celltfusion(
     ] = None,
     universe_csv: Annotated[
         str | None,
-        Field(description="Optional user-supplied TF-target network CSV (source/target columns) for the internal TF activity step, instead of fetching tf_collection. Ignored if tfs_csv is given.")
+        Field(description="Optional user-supplied TF-target network CSV (source/target/mor columns) for the internal TF activity step, instead of fetching tf_collection. Ignored if tfs_csv is given, and when tf_collection='ARACNE' (use aracne_network_file for that).")
     ] = None,
     paths_csv: Annotated[
         str | None,
@@ -199,23 +205,22 @@ async def run_celltfusion(
         Field(description="Optional .rds holding a named list of custom gene sets (character vectors of gene symbols) additionally scored via GSVA during the internal pathway activity step. Ignored if pathways_csv is given.")
     ] = None,
     normalized: Annotated[bool, Field(description="Set False if raw_counts_csv already holds log-TPM normalized values instead of raw counts.")] = True,
-    coldata_csv: Annotated[str | None, Field(description="Optional clinical/sample metadata CSV, samples as rows, needed for batch mode (batch_column) or downstream trait association with TF modules.")] = None,
-    batch: Annotated[bool, Field(description="Run in multi-cohort/batch mode, aligning cell groups and factors across cohorts rather than treating all samples as one uniform batch.")] = False,
+    coldata_csv: Annotated[str | None, Field(description="Optional sample metadata CSV, samples as rows. Only used in batch mode, to read batch_column -- required then.")] = None,
+    batch: Annotated[bool, Field(description="Run in multi-cohort/batch mode: TF activity is inferred per cohort and the cohort is treated as a categorical covariate (per-cohort means) when building modules and cell groups, rather than treating all samples as one uniform batch. Requires coldata_csv and batch_column.")] = False,
     batch_column: Annotated[str | None, Field(description="Column in coldata_csv identifying each sample's cohort, if batch=True.")] = None,
     deconv_methods: Annotated[
         list[str],
         Field(
             description=(
                 "Deconvolution methods to run internally if deconv_csv/dt_rds are not supplied. "
-                "CIBERSORTx (CBSX) IS part of the default set (matching multideconv-server's "
-                "run_deconvolution), but it needs separate Docker credentials (cbsx_mail + "
-                "cbsx_token) to actually run -- see this tool's docstring for the "
-                "credential-gathering step required before calling with CBSX included."
+                "Add 'CBSX' to also run CIBERSORTx -- not in the default set (as in CellTFusion "
+                "itself), since it needs separate CIBERSORTx credentials (cbsx_mail + cbsx_token) "
+                "and the call is rejected without them."
             )
         ),
-    ] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS", "CBSX"],
-    cbsx_mail: Annotated[str | None, Field(description="CIBERSORTx account email, required (with cbsx_token) to run the CBSX method (included in deconv_methods by default). Register for free at https://cibersortx.stanford.edu if the user doesn't already have an account.")] = None,
-    cbsx_token: Annotated[str | None, Field(description="CIBERSORTx API token, required (with cbsx_mail) to run the CBSX method (included in deconv_methods by default). Get it from the account's settings at https://cibersortx.stanford.edu.")] = None,
+    ] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS"],
+    cbsx_mail: Annotated[str | None, Field(description="CIBERSORTx account email, required (with cbsx_token) when 'CBSX' is in deconv_methods. Register for free at https://cibersortx.stanford.edu if the user doesn't already have an account.")] = None,
+    cbsx_token: Annotated[str | None, Field(description="CIBERSORTx API token, required (with cbsx_mail) when 'CBSX' is in deconv_methods. Get it from the account's settings at https://cibersortx.stanford.edu.")] = None,
     file_name: Annotated[str | None, Field(description="File name prefix for outputs (plots, module matrices) saved under run_dir/Results.")] = None,
     tf_collection: Annotated[
         Literal["CollecTRI", "Dorothea", "ARACNE"],
@@ -224,14 +229,26 @@ async def run_celltfusion(
                 "Source of the TF-target regulon network used to infer TF activity. 'CollecTRI' "
                 "and 'Dorothea' are prebuilt, literature-curated collections from OmnipathR -- "
                 "generic, not tissue/cancer-specific, and a reasonable default for most analyses. "
-                "'ARACNE' instead uses a user-supplied, data-driven network (regulator/target/"
-                "mutual-information triples, e.g. from ARACNe-AP run on matched expression data) "
-                "-- pick this when you have or want a cancer-type/cohort-specific regulatory "
-                "network rather than a generic literature-derived one; it requires the network file "
-                "to already exist under input/ARACNE/<cancer_type>/network/network.txt."
+                "'ARACNE' instead uses a user-supplied, data-driven network (e.g. from ARACNe-AP "
+                "run on matched expression data; each edge's sign is the Spearman correlation "
+                "between TF and target) -- pick this when you have a cancer-type/cohort-specific "
+                "regulatory network rather than a generic literature-derived one. Requires "
+                "aracne_network_file."
             )
         ),
     ] = "CollecTRI",
+    aracne_network_file: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Tab-separated ARACNe network file with 'Regulator' and 'Target' columns (e.g. "
+                "ARACNe-AP's network.txt) -- required when tf_collection='ARACNE', ignored "
+                "otherwise. CellTFusion only reads it from input/ARACNE/<cancer_type>/network/"
+                "network.txt relative to the run directory, so it is copied there before the R "
+                "call (under 'custom' instead of the cancer type when cancer_type is unset)."
+            )
+        ),
+    ] = None,
     min_targets_size: Annotated[int, Field(ge=1, description="Minimum number of target genes a TF's regulon must have present/expressed in this dataset to be scored. Lower it if too few TFs get activity scores (see warnings); raise it to require more evidence per TF.")] = 3,
     min_module_size: Annotated[int, Field(ge=1, description="Minimum number of TFs per WGCNA co-activity module. Lower for more, finer/smaller modules; raise for fewer, larger, more robust modules.")] = 3,
     corr_mod: Annotated[float, Field(ge=0, le=1, description="Correlation threshold for merging similar TF modules together. Lower merges more aggressively into fewer, broader modules; higher keeps modules more finely split.")] = 0.9,
@@ -242,14 +259,13 @@ async def run_celltfusion(
     enrich_thresh: Annotated[float, Field(ge=0, description="Minimum enrichment ratio (foreground/background cell-type frequency) required to include a cell type in a latent factor's niche description.")] = 1.5,
     quantile_cutoff: Annotated[float, Field(ge=0, le=1, description="Quantile threshold for selecting the top-contributing cell groups per NMF factor when describing what each factor represents.")] = 0.7,
     cancer_type: Annotated[
-        str | None,
+        Literal["blca", "luad", "skcm"] | None,
         Field(
             description=(
-                "TCGA cancer type abbreviation (e.g. 'blca', 'luad', 'skcm'). Used both to load the "
-                "bundled TCGA meta-program reference for TME_states annotation, and, when "
-                "tf_collection='ARACNE', to locate that cancer type's ARACNe network file. Required "
-                "for TME_states to populate; if omitted and only one ARACNe network exists on disk, "
-                "it's auto-detected for that purpose only."
+                "TCGA cancer type with a bundled meta-program reference ('blca', 'luad' or "
+                "'skcm'), used to map the NMF latent factors onto TCGA meta-programs (TME_states). "
+                "If unset, that mapping step is skipped and TME_states/Metaprograms_reference are "
+                "NULL -- the rest of the pipeline is unaffected."
             )
         ),
     ] = None,
@@ -274,28 +290,37 @@ async def run_celltfusion(
     bioinfotools-server) -- otherwise each step is recomputed internally, which is slower but
     self-contained.
 
-    CIBERSORTx (CBSX) credentials: if deconv_csv/dt_rds are NOT supplied, this tool runs its own
-    internal deconvolution (multideconv::compute.deconvolution under the hood), and CBSX is part
-    of the default deconv_methods set here too -- matching multideconv-server's run_deconvolution.
-    CBSX is the one method that needs a CIBERSORTx Docker account (cbsx_mail + cbsx_token), which
-    nothing in this pipeline can supply on its own. Before calling this tool with CBSX still in
-    deconv_methods and no deconv_csv/dt_rds supplied, ask the user for their CIBERSORTx email and
-    API token, exactly as for multideconv-server's run_deconvolution:
-      - If they already have credentials, pass them via cbsx_mail/cbsx_token and keep CBSX in
-        deconv_methods.
-      - If they don't, tell them to register a free account and generate a token at
-        https://cibersortx.stanford.edu, then offer two options and let the user pick: (1) run
-        now with CBSX excluded from deconv_methods, or (2) wait until they have the credentials
-        and call this tool then, with CBSX left in deconv_methods and cbsx_mail/cbsx_token filled
-        in.
-      - Don't silently drop CBSX and don't silently run without asking. This entire step is
-        unnecessary (and these two params are ignored) whenever deconv_csv or dt_rds is supplied,
-        since no internal deconvolution runs in that case.
+    CIBERSORTx (CBSX): not in the default deconv_methods (matching CellTFusion itself). It's only
+    relevant when this tool runs its own deconvolution (no deconv_csv/dt_rds). If the user wants
+    CBSX included, ask for their CIBERSORTx email and API token (cbsx_mail/cbsx_token; free
+    registration at https://cibersortx.stanford.edu) -- CellTFusion stops without them, so the
+    call is rejected up front.
 
     Returns a list with 10 elements (see field_glossary). This is the heaviest tool on this
     server (WGCNA + GSVA + NMF); progress is reported periodically. cancer_type is required for
     the TME_states element to populate.
     """
+    if batch and not (coldata_csv and batch_column):
+        raise ToolError("batch=True needs coldata_csv and batch_column (the column with each sample's cohort).")
+    if "CBSX" in deconv_methods and not (deconv_csv or dt_rds) and not (cbsx_mail and cbsx_token):
+        raise ToolError(
+            "'CBSX' is in deconv_methods but cbsx_mail/cbsx_token weren't given -- CellTFusion stops "
+            "without CIBERSORTx credentials. Pass them, or drop 'CBSX' from deconv_methods."
+        )
+    if tf_collection == "ARACNE" and not tfs_csv:
+        if not aracne_network_file:
+            raise ToolError("tf_collection='ARACNE' needs aracne_network_file (tab-separated, Regulator/Target columns).")
+        src = Path(aracne_network_file).expanduser().resolve()
+        if not src.is_file():
+            raise ToolError(f"aracne_network_file not found: {src}")
+        output_dir = resolve_output_dir(
+            runs_root=server_home("celltfusion") / "runs", tool_name="run_celltfusion",
+            output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        )
+        dest = Path(output_dir) / "input" / "ARACNE" / (cancer_type or "custom") / "network"
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest / "network.txt")
+
     args = args_from(
         **{
             "raw.counts": csv_arg(raw_counts_csv, row_names=1, as_matrix=True),

@@ -6,6 +6,8 @@ session-management tools (registered once per server via
 
 from __future__ import annotations
 
+import time
+import uuid
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
 
@@ -108,6 +110,32 @@ SessionIdParam = Annotated[
         )
     ),
 ]
+
+
+def resolve_output_dir(
+    *,
+    runs_root: Path,
+    tool_name: str,
+    output_dir: str | None,
+    session_id: str | None,
+    session_config: SessionConfig,
+) -> str:
+    """The run directory a call will use, resolved before it runs -- for tools that must stage
+    files the R function reads from a fixed relative path (e.g. multideconv's
+    Results/custom_signatures/, CellTFusion's input/ARACNE/). Pass the result as that call's
+    output_dir so `_run` uses the same directory.
+    """
+    if output_dir is not None:
+        resolved = output_dir
+    elif session_id is not None:
+        try:
+            session = Session.load(session_config, session_id)
+        except SessionError as e:
+            raise ToolError(str(e)) from e
+        resolved = str(session.run_dir_for(tool_name))
+    else:
+        resolved = str(runs_root / f"{tool_name}_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}")
+    return str(Path(resolved).expanduser().resolve())
 
 
 def make_run(*, runs_root: Path) -> Callable:

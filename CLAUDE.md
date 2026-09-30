@@ -47,7 +47,7 @@ elements as CSVs, between two stdout markers `r_bridge.py` parses out.
 
 Each `args` entry is built by one of `r_bridge.py`'s typed constructors
 (`csv_arg`, `csv_column_arg`, `csv_list_arg`, `csv_rownames_arg`, `rds_arg`,
-`rds_element_arg`, `path_arg`, `r_function_arg`, `named_r_function_arg`,
+`rds_element_arg`, `rds_element_rownames_arg`, `path_arg`, `r_function_arg`, `named_r_function_arg`,
 `lit`, `named_args_arg`), matched by a same-named `"__type__"` case in
 `run_tool.R`'s `resolve_arg()`. Adding a new kind of argument means adding a
 constructor on the Python side and a matching resolver case in R -- both
@@ -103,26 +103,66 @@ push to one of the five upstream repos requires manually reinstalling it.
 
 ### Known upstream bugs are documented, not patched
 
-When a wrapped R package has a real bug (currently:
-`multideconv::prepare_multideconv_folds()`'s per-fold branch never
-`return()`-ing its computed folds), this repo documents the bug in the
-tool's own docstring and the README rather than patching the upstream
-package -- this repo only wraps upstream code, it doesn't fork it. Search
-for "Known upstream issue" and "TEMP" across `server.py`/README when
-touching a tool that has one; a `TEMP` marker specifically means a fix is
-expected soon (the multideconv `prepare_multideconv_folds` one) and should
-be removed once confirmed fixed upstream, not treated as permanent.
+When a wrapped R package has a real bug, this repo documents the bug in the
+tool's own docstring (and README if user-facing) rather than patching the
+upstream package -- this repo only wraps upstream code, it doesn't fork it.
+Where the bug is cheap to detect from the arguments, the tool also rejects
+the call up front with a `ToolError` instead of letting a long R run crash
+at the end. Search for "Known upstream issue" and "TEMP" across
+`server.py`/tests when touching a tool that has one; a `TEMP` marker means a
+fix is expected soon and should be removed once confirmed fixed upstream,
+not treated as permanent.
 
-pipeML's earlier `hyperparams`-not-found bug (crashing any
-`compute_features.training.ML` call whose `metric` wasn't `"AUROC"`/
-`"AUPRC"`) and the now-deleted `compute_features.ML`'s undeclared
-`fold_models_dir` reference were both confirmed fixed upstream as of the
-last check of `/home/marcelo.hurtado/Documents/pipeML` -- `metric` now
-defaults safely to `"Accuracy"` with an explicit validation `stop()` for
-truly invalid values. Also note: pipeML removed model **stacking** entirely
-(the `stack` parameter no longer exists on `compute_features.training.ML`
-or `compute_prediction`) -- this repo's `train_ml_model`/`predict_ml_model`
-no longer expose it, matching current upstream. If either package is
-reinstalled to a version predating these changes, these tools would break
-again (missing/unused-argument errors) -- see "R package installation"
-above for why that can happen silently.
+No upstream bug is currently guarded this way (pipeML's old custom-fold +
+`metric = "Accuracy"` crash went away when pipeML dropped `"Accuracy"`).
+
+### Upstream API as of the last sync (2026-09-30)
+
+Synced against pipeML `e727861`, multideconv `c2a9813`, CellTFusion
+`c83375a`, RaCInG `fef8ff0` **plus its uncommitted working-tree edit** of
+`R/RaCInG_input_generation.R` (subgroup-aware expression profiles), and
+BioinfoTools `2b0a0e2` (README-only since the installed `5be0c79`, so not
+reinstalled). The others were reinstalled with `R CMD INSTALL
+/home/marcelo.hurtado/Documents/<repo>` (repos: `pipeML`, `multideconv`,
+`CellTFusion`, `RaCInG_package`, `Bioinfo-tools`). Things the servers
+depend on:
+
+- `pipeML::compute_shap_values(model_trained, task_type, seed)` explains
+  the **final** model on all training samples (one fixed feature definition,
+  also for `fold_construction_fun` features) and stores the mean prediction
+  in `attr(, "baseline")` -- run_tool.R's `summarize()` now surfaces small
+  atomic attributes as `summary.attributes`. `plot_shap_stability()`,
+  per-fold models and `fold_models_dir` are gone everywhere.
+- `compute_features.training.ML()`: classification `metric` is only
+  `"AUROC"` (default when NULL) or `"AUPRC"`; the server never sends
+  `metric` for survival (pipeML warns). `ncores` also parallelizes standard
+  survival CV. With `fold_construction_fun`, `ncores = NULL` still builds a
+  0-node cluster, so the server fills in a core count. Fold functions get
+  the outcome inside `data` (`target` coded no/yes, or `time`/`event`), so
+  survival + `prepare_multideconv_folds` works.
+- `compute_prediction()` returns `Curve_bands` and errors when the target
+  length doesn't match the test rows -- hence `csv_column_arg(...,
+  align_to=...)`, which matches a coldata column to a feature CSV by row name.
+- `multideconv::prepare_multideconv_folds()` reads the outcome from
+  `data`'s `target` or `time`+`event` columns; `time_var`/`event_var`/
+  `trait.positive` were removed (and from `prepare_deconvolution_folds`).
+  CBSX requested without credentials warns and is skipped in multideconv.
+- `CellTFusion()`: default `deconv_methods` no longer includes CBSX (and it
+  still *stops* without credentials -- the tool rejects that up front);
+  `cancer_type` is one of blca/luad/skcm or NULL (mapping skipped);
+  `batch = TRUE` needs coldata + batch_id; ARACNE networks are read from
+  `input/ARACNE/<cancer_type>/network/network.txt` relative to the run dir,
+  so `run_celltfusion` copies `aracne_network_file` there via
+  `common/tools.py:resolve_output_dir` (also used by `run_deconvolution`).
+- RaCInG exports `computeLRContributions`/`computeWedgeLRContributions`/
+  `computeTriangleLRContributions` (wrapped as `explain_lr_contributions`,
+  fed from `prepare_racing_inputs`' result.rds). `compute_racing_kernel`/
+  `compute_racing_montecarlo` default `output_folder` to a hardcoded
+  `~/Documents/racing/vignettes/`, so the server always passes `"Results/"`.
+  A user-supplied `deconv` is fit as ONE composition when estimating
+  expression profiles (only the internally computed one is fit per
+  method/signature block).
+
+If a package is reinstalled to a version predating these changes, these
+tools would break again (missing/unused-argument errors) -- see "R package
+installation" above for why that can happen silently.

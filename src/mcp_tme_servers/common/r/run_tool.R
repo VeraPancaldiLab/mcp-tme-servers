@@ -20,7 +20,8 @@
 # "csv_list" (a CSV wrapped as list(df)), "csv_rownames" (a CSV's row names as
 # a plain character vector), "rds" (readRDS()'d as-is), "rds_element" (one
 # named element of a .rds file's top-level list, e.g. a prior tool's
-# result.rds$Model), "r_named_function" (a function exported by an installed
+# result.rds$Model), "rds_element_rownames" (that element's row names, e.g.
+# a prior RaCInG input's patient labels), "r_named_function" (a function exported by an installed
 # sister package, looked up by name -- e.g. multideconv::prepare_multideconv_folds,
 # for a parameter that expects an actual R function object), "named_args" (a
 # named list of heterogeneously-typed values, e.g. for pipeML's
@@ -50,11 +51,10 @@ workdir <- manifest$workdir
 dir.create(workdir, recursive = TRUE, showWarnings = FALSE)
 setwd(workdir)
 
-# multideconv's own .onLoad hook creates this as a side effect of being
-# attached below, but BioinfoTools doesn't (its functions still write to
-# "Results/..." directly) -- create it up front, unconditionally, so every
-# package's functions can rely on it existing regardless of which one this
-# call targets.
+# multideconv's .onLoad no longer creates this in non-interactive sessions
+# (Rscript), and BioinfoTools/CellTFusion functions write to "Results/..."
+# directly -- create it up front, unconditionally, so every package's
+# functions can rely on it existing regardless of which one this call targets.
 dir.create(file.path(workdir, "Results"), recursive = TRUE, showWarnings = FALSE)
 
 is_scalarish <- function(v) is.character(v) || is.numeric(v) || is.logical(v) || is.null(v)
@@ -85,8 +85,24 @@ resolve_arg <- function(spec) {
     row_names <- spec$row_names
     if (is.null(row_names)) row_names <- 1L else row_names <- as.integer(row_names)
     df <- utils::read.csv(spec$path, row.names = row_names, check.names = FALSE)
+    if (!spec$column %in% colnames(df)) {
+      stop("Column '", spec$column, "' not found in ", spec$path)
+    }
     col <- df[[spec$column]]
     names(col) <- rownames(df)
+    # Optionally follow another CSV's sample order (row names) instead of this one's
+    if (!is.null(spec$align_to)) {
+      ids <- rownames(utils::read.csv(spec$align_to, row.names = 1, check.names = FALSE))
+      missing_ids <- setdiff(ids, names(col))
+      if (length(missing_ids) == 0) {
+        col <- col[ids]
+      } else if (length(col) != length(ids)) {
+        stop(length(missing_ids), " sample(s) of ", basename(spec$align_to), " are missing from the row names of ",
+             basename(spec$path), " (e.g. ", paste(utils::head(missing_ids, 5), collapse = ", "),
+             "), and the two files have different numbers of rows, so '", spec$column,
+             "' cannot be matched to them")
+      }
+    }
     return(col)
   }
 
@@ -109,6 +125,10 @@ resolve_arg <- function(spec) {
 
   if (type == "rds_element") {
     return(readRDS(spec$path)[[spec$element]])
+  }
+
+  if (type == "rds_element_rownames") {
+    return(rownames(readRDS(spec$path)[[spec$element]]))
   }
 
   if (type == "r_function") {
@@ -202,6 +222,10 @@ summarize <- function(x, depth = 0) {
       colnames = utils::head(colnames(x), 25),
       rownames = utils::head(rownames(x), 10)
     )
+    # Small atomic attributes a function attaches on purpose (e.g. pipeML SHAP's "baseline")
+    extra <- setdiff(names(attributes(x)), c("names", "row.names", "class", "dim", "dimnames"))
+    extra <- Filter(function(a) is.atomic(attr(x, a)) && length(attr(x, a)) <= 20, extra)
+    if (length(extra) > 0) info$attributes <- lapply(stats::setNames(extra, extra), function(a) attr(x, a))
     numeric_vals <- suppressWarnings(as.numeric(as.matrix(x)))
     if (any(!is.na(numeric_vals))) {
       info$numeric_summary <- list(

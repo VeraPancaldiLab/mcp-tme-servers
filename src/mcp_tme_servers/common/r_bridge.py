@@ -45,9 +45,19 @@ def csv_arg(path: str, row_names: int | None = 1, as_matrix: bool = False) -> di
     return {"__type__": "csv", "path": _abs(path), "row_names": row_names, "as_matrix": as_matrix}
 
 
-def csv_column_arg(path: str, column: str, row_names: int | None = 1) -> dict:
-    """A single named column of a CSV file, returned as an R vector."""
-    return {"__type__": "csv_column", "path": _abs(path), "column": column, "row_names": row_names}
+def csv_column_arg(path: str, column: str, row_names: int | None = 1, align_to: str | None = None) -> dict:
+    """A single named column of a CSV file, returned as an R vector.
+
+    With align_to (another CSV, e.g. the feature matrix this column annotates), the column
+    is reordered to follow align_to's row names (sample IDs) -- so a coldata/target CSV
+    doesn't have to share the feature CSV's exact rows and order. If some of align_to's row
+    names are missing from this CSV, it falls back to the old positional contract when both
+    have the same number of rows, and errors (naming the missing IDs) otherwise.
+    """
+    spec = {"__type__": "csv_column", "path": _abs(path), "column": column, "row_names": row_names}
+    if align_to is not None:
+        spec["align_to"] = _abs(align_to)
+    return spec
 
 
 def csv_list_arg(path: str, row_names: int | None = 1, as_matrix: bool = False) -> dict:
@@ -77,9 +87,17 @@ def rds_element_arg(path: str, element: str) -> dict:
     """One named element of a .rds file's top-level list, e.g. readRDS(path)[["Model"]] --
     for a downstream R function (like pipeML's compute_prediction/compute_shap_values) that
     expects the inner trained-model object itself, not the wrapping result list a tool's own
-    result.rds holds (Model, Features, CV_Results, ...).
+    result.rds holds (Model, ML_Models, AUROC_median, ...).
     """
     return {"__type__": "rds_element", "path": _abs(path), "element": element}
+
+
+def rds_element_rownames_arg(path: str, element: str) -> dict:
+    """The row names of one named element of a .rds file's top-level list, e.g.
+    rownames(readRDS(path)[["Cmatrix"]]) -- for an argument that wants labels (e.g. RaCInG's
+    patient_names) that only exist as a prior tool's matrix row names.
+    """
+    return {"__type__": "rds_element_rownames", "path": _abs(path), "element": element}
 
 
 def path_arg(path: str) -> dict:

@@ -13,6 +13,7 @@ library `Rscript` (on PATH) resolves to.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Annotated, Literal
 
 from mcp.server import MCPServer
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "pipeML-server",
     instructions=(
-        "Tools for leakage-free classification/survival modeling on precomputed feature tables (typically cell-type deconvolution, TF-module, or network features from this package's multideconv, CellTFusion, or RaCInG servers). Pipeline: train_ml_model (train + cross-validate) -> predict_ml_model (score a held-out test set) -> optionally compute_shap_values (per-feature importance). Both classification (AUROC/AUPRC/Accuracy) and survival (C-index, Kaplan-Meier) tasks are supported, with repeated k-fold, leave-one-dataset-out (LODO), or custom per-fold feature recomputation (fold_construction_fun) for cohort-dependent features. "
+        "Tools for leakage-free classification/survival modeling on precomputed feature tables (typically cell-type deconvolution, TF-module, or network features from this package's multideconv, CellTFusion, or RaCInG servers). Pipeline: train_ml_model (train + cross-validate) -> predict_ml_model (score a held-out test set) -> optionally compute_shap_values (per-feature importance). Both classification (AUROC/AUPRC) and survival (C-index, Kaplan-Meier) tasks are supported, with repeated k-fold, leave-one-dataset-out (LODO), or custom per-fold feature recomputation (fold_construction_fun) for cohort-dependent features. "
         "IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to pipeML itself: Hurtado, M., & Pancaldi, V. (2026). A new pipeline for cross-validation fold-aware machine learning prediction of clinical outcomes addresses hidden data-leakage in omics based 'predictors'. bioRxiv. https://doi.org/10.64898/2026.03.12.711429 -- plus whichever specific ML algorithms it selected were actually used. "
         "IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user."
     ),
@@ -58,15 +59,23 @@ register_session_tools(mcp, SESSION_CONFIG, domain="ML/survival modeling")
 # pipeML tools
 # --------------------------------------------------------------------------
 
-MLMetric = Literal["Accuracy", "AUROC", "AUPRC", "C-index"]
+MLMetric = Literal["AUROC", "AUPRC"]
 
 _TRAINING_GLOSSARY = {
-    "Model": "The trained model object.",
-    "Features": "The exact feature set used for training after pipeML's internal preprocessing (near-zero-variance removal, collinearity filtering, optional Boruta selection).",
-    "CV_Results": "Cross-validated performance (metric per fold/repetition) from the repeated or LODO cross-validation -- this is the honest, leakage-free estimate of how the model would perform on unseen data from this cohort, not a training-set fit.",
-    "AUROC_median": "Median AUROC across CV folds/repetitions -- discrimination between classes irrespective of a decision threshold. 0.5 = no better than chance, 1.0 = perfect separation.",
-    "AUPRC_median": "Median AUPRC (area under precision-recall curve) across CV folds/repetitions -- more informative than AUROC when the positive class is rare, since it isn't inflated by a large pool of easy true negatives.",
-    "ML_Models": "The per-algorithm trained models compared during selection (before/alongside picking the best one).",
+    "Model": (
+        "The selected (best cross-validated) model, trained on all training samples with its "
+        "tuned hyperparameters. Classification: a caret train object (tuned hyperparameters in "
+        "$bestTune, performance per CV resample in $resample -- the honest, leakage-free "
+        "estimate of how it would perform on unseen data from this cohort, not a training-set "
+        "fit). Survival: a list with the model name ($model), the fitted workflow "
+        "($Model_object), $bestTune, the C-index per resample ($Resample_matrix) and the "
+        "training data ($trainingData). predict_ml_model and compute_shap_values read this "
+        "element."
+    ),
+    "ML_Models": "Every algorithm trained and cross-validated during selection (the best one is also returned as Model), with each one's per-fold CV results -- useful to compare how close the runners-up were.",
+    "AUROC_median": "Median AUROC across CV folds/repetitions, per algorithm (classification) -- discrimination between classes irrespective of a decision threshold. 0.5 = no better than chance, 1.0 = perfect separation. Median and MAD per algorithm.",
+    "AUPRC_median": "Median AUPRC (area under precision-recall curve) across CV folds/repetitions, per algorithm (classification) -- more informative than AUROC when the positive class is rare, since it isn't inflated by a large pool of easy true negatives. Median and MAD per algorithm.",
+    "C_index_median": "Median cross-validated concordance index of the selected survival model (survival only) -- the fraction of comparable patient pairs correctly ordered by predicted risk; 0.5 = random, 1.0 = perfect ranking.",
     "Custom_output": (
         "Present only when fold_construction_fun was set. The learned feature-space structure "
         "from the final full-training-data refit (e.g. for prepare_multideconv_folds, this is "
@@ -75,7 +84,8 @@ _TRAINING_GLOSSARY = {
         "input to project a held-out test cohort into this exact same feature space before "
         "calling predict_ml_model on it. Feeding predict_ml_model a test set that wasn't "
         "projected this way (e.g. a raw deconvolution matrix instead) will silently score against "
-        "the wrong feature space."
+        "the wrong feature space. The selected feature-construction parameters (when "
+        "fold_construction_args_tunable was used) are in its $Parameters."
     ),
 }
 
@@ -83,6 +93,7 @@ _PREDICTION_GLOSSARY = {
     "Metrics": "Performance metrics (Accuracy, Sensitivity, Specificity, Precision, Recall, F1, MCC) at each classification threshold, plus the optimal threshold (classification only).",
     "AUC": "AUROC and AUPRC on the test set, with bootstrap confidence intervals (classification only).",
     "Predictions": "Predicted class probabilities for each test-set sample (classification only).",
+    "Curve_bands": "Pointwise 95% bootstrap confidence bands around the ROC (fpr, lower, upper) and precision-recall (recall, lower, upper) curves, from 1000 bootstrap resamples of the test set (classification only) -- the shaded bands in the saved ROC/PRC plots.",
     "preds": "Predicted risk scores for each test-set sample, higher = higher risk (survival only).",
     "c_index": "Concordance index on the test set (survival only) -- the fraction of comparable patient pairs correctly ordered by predicted risk; 0.5 = random, 1.0 = perfect ranking.",
     "c_index_lower": "Lower bound of the C-index confidence interval (survival only).",
@@ -90,10 +101,11 @@ _PREDICTION_GLOSSARY = {
 }
 
 
+
 def _cv_diagnostics(summary: dict) -> list[str]:
     warnings: list[str] = []
     elements = summary.get("elements", {})
-    for key in ("AUROC_median", "AUPRC_median"):
+    for key in ("AUROC_median", "AUPRC_median", "C_index_median"):
         el = elements.get(key, {})
         preview = el.get("preview")
         if preview and isinstance(preview, list) and preview and isinstance(preview[0], (int, float)):
@@ -139,7 +151,7 @@ async def train_ml_model(
         Field(
             description=(
                 "'classification' predicts a categorical outcome (e.g. treatment responder vs "
-                "non-responder) via AUROC/AUPRC/Accuracy. 'survival' predicts time-to-event risk "
+                "non-responder) via AUROC/AUPRC. 'survival' predicts time-to-event risk "
                 "(e.g. progression-free survival) via a Cox/AFT/survival-forest-family model "
                 "evaluated by concordance index (C-index)."
             )
@@ -148,19 +160,20 @@ async def train_ml_model(
     ctx: Context,
     output_dir: OutputDir = None,
     session_id: SessionIdParam = None,
-    target_csv: Annotated[str | None, Field(description="CSV with a target column, row-aligned to (same rows/order as) features_train_csv -- required for classification.")] = None,
+    target_csv: Annotated[str | None, Field(description="CSV with the target column (or survival time/event columns), sample IDs as its first column -- required. Its values are matched to features_train_csv's samples by those IDs, so it may hold extra samples or a different order; only when IDs don't match does it fall back to row position, which then requires the same number of rows.")] = None,
     target_column: Annotated[str | None, Field(description="Column in target_csv to use as the classification target.")] = None,
     trait_positive: Annotated[str | None, Field(description="Value in the target column that represents the positive class (e.g. 'Responder') -- determines which direction AUROC/AUPRC are computed in.")] = None,
     time_column: Annotated[str | None, Field(description="Column in target_csv with survival time (survival tasks).")] = None,
     event_column: Annotated[str | None, Field(description="Column in target_csv with the event indicator: 1 = event occurred (e.g. death, progression), 0 = censored (survival tasks).")] = None,
-    metric: Annotated[MLMetric | None, Field(description="Metric to optimize hyperparameter selection against. AUROC/AUPRC for imbalanced classification, Accuracy for balanced classification, C-index for survival. Leave unset for pipeML's own default (Accuracy).")] = None,
+    metric: Annotated[MLMetric | None, Field(description="Metric to select hyperparameters and the best algorithm by (classification only): 'AUROC' (used when unset) or 'AUPRC', which is more informative when the positive class is rare. Ignored for survival, which always selects by C-index.")] = None,
     k_folds: Annotated[int, Field(ge=2, description="Number of cross-validation folds.")] = 10,
     n_rep: Annotated[int, Field(ge=1, description="Number of repeated CV repetitions -- more repetitions give a more stable performance estimate at proportionally more compute.")] = 5,
     lodo: Annotated[bool, Field(description="Leave-one-dataset-out CV (stratified by batch_column) instead of random k-fold -- tests whether the model generalizes across cohorts/sequencing batches, a stronger check than random-split k-fold when you have multiple source cohorts.")] = False,
     batch_csv: Annotated[str | None, Field(description="CSV with a cohort/batch column, required if lodo=True.")] = None,
     batch_column: Annotated[str | None, Field(description="Column in batch_csv identifying each sample's cohort, required if lodo=True.")] = None,
     file_name: Annotated[str | None, Field(description="File name prefix for saved performance plots.")] = None,
-    ncores: Annotated[int | None, Field(description="CPU cores for parallel CV; default detectCores()-1.")] = None,
+    ncores: Annotated[int | None, Field(ge=1, description="CPU cores to process cross-validation folds in parallel (classification and survival; results don't depend on it). If unset, standard CV runs sequentially, and a fold_construction_fun run uses all cores but one (it always needs a parallel cluster).")] = None,
+    seed: Annotated[int, Field(description="Random seed fixing the fold assignment and the randomness in model fitting (random forest, bagging, boosting), also when running in parallel -- the same seed and inputs give the same model and CV results. Randomness inside fold_construction_fun's own parallel workers is not covered.")] = 123,
     fold_construction_fun: Annotated[
         Literal["prepare_multideconv_folds"] | None,
         Field(
@@ -192,11 +205,9 @@ async def train_ml_model(
                 "backing the final trained model are only available afterward, in this call's own "
                 "result under Custom_output -- ask for that field's contents directly if you want "
                 "to see them, and see features_train_csv's own description for what input this "
-                "requires. TEMP: prepare_multideconv_folds currently has an upstream bug -- its "
-                "fold-construction branch computes and saves folds to disk but returns NULL "
-                "instead of the fold list, which will break this training call with a fold-related "
-                "error inside pipeML. Fix is pending in the multideconv package; remove this "
-                "warning once confirmed fixed."
+                "requires. Works for classification and survival: pipeML hands the fold function "
+                "the features plus the outcome columns (target, or time and event), which it keeps "
+                "out of the harmonization."
             )
         ),
     ] = None,
@@ -222,18 +233,6 @@ async def train_ml_model(
                 "parameter that affects downstream model performance, such as a clustering "
                 "resolution). Leave unset if fold_construction_fun's parameters should stay fixed "
                 "(use fold_construction_args_fixed instead)."
-            )
-        ),
-    ] = None,
-    fold_models_dir: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Directory to cache each fold's fitted model when fold_construction_fun is set, "
-                "so compute_shap_values can reuse them instead of refitting from scratch. Defaults "
-                "to pipeML's own \"Results/fold_models\" (relative to this call's run_dir) if "
-                "unset -- pass the same path to compute_shap_values' fold_models_dir to take "
-                "advantage of the cache."
             )
         ),
     ] = None,
@@ -267,26 +266,37 @@ async def train_ml_model(
     This can be a slow call with many folds/repetitions or a fold_construction_fun (which reruns
     feature construction per fold); progress is reported periodically.
     """
+    # pipeML warns whenever metric is set for survival (which is always selected by C-index)
+    if task_type == "survival":
+        metric = None
+    # The custom-fold path always builds a parallel cluster of `ncores` workers; NULL gives a
+    # 0-node cluster
+    if fold_construction_fun and ncores is None:
+        ncores = max(1, (os.cpu_count() or 2) - 1)
+
+    def target_col(column: str | None) -> dict | None:
+        return csv_column_arg(target_csv, column, align_to=features_train_csv) if (target_csv and column) else None
+
     args = args_from(
         **{
             "features_train": csv_arg(features_train_csv, row_names=1),
             "task_type": lit(task_type),
-            "target_var": csv_column_arg(target_csv, target_column) if (target_csv and target_column) else None,
+            "target_var": target_col(target_column),
             "trait.positive": lit(trait_positive) if trait_positive else None,
-            "time_var": csv_column_arg(target_csv, time_column) if (target_csv and time_column) else None,
-            "event_var": csv_column_arg(target_csv, event_column) if (target_csv and event_column) else None,
+            "time_var": target_col(time_column),
+            "event_var": target_col(event_column),
             "metric": lit(metric) if metric else None,
             "k_folds": lit(k_folds),
             "n_rep": lit(n_rep),
             "LODO": lit(lodo),
-            "batch_var": csv_column_arg(batch_csv, batch_column) if (batch_csv and batch_column) else None,
+            "batch_var": csv_column_arg(batch_csv, batch_column, align_to=features_train_csv) if (batch_csv and batch_column) else None,
             "file_name": lit(file_name) if file_name else None,
             "ncores": lit(ncores) if ncores is not None else None,
             "return": lit(True),
             "fold_construction_fun": named_r_function_arg(fold_construction_fun, "multideconv") if fold_construction_fun else None,
             "fold_construction_args_fixed": named_args_arg(fold_construction_args_fixed) if fold_construction_args_fixed else None,
             "fold_construction_args_tunable": named_args_arg(fold_construction_args_tunable) if fold_construction_args_tunable else None,
-            "fold_models_dir": lit(fold_models_dir) if fold_models_dir else None,
+            "seed": lit(seed),
         }
     )
     return await _run(
@@ -326,7 +336,7 @@ async def predict_ml_model(
     ctx: Context,
     output_dir: OutputDir = None,
     session_id: SessionIdParam = None,
-    target_csv: Annotated[str | None, Field(description="CSV with the true target column, row-aligned to test_data_csv -- required for classification.")] = None,
+    target_csv: Annotated[str | None, Field(description="CSV with the true target column (or survival time/event columns), sample IDs as its first column -- required. Its values are matched to test_data_csv's samples by those IDs, so it may hold extra samples (e.g. a whole-cohort coldata) or a different order; only when IDs don't match does it fall back to row position, which then requires the same number of rows.")] = None,
     target_column: Annotated[str | None, Field(description="Column in target_csv with the true classification labels.")] = None,
     trait_positive: Annotated[str | None, Field(description="Value in the target column representing the positive class -- must match what train_ml_model used.")] = None,
     time_column: Annotated[str | None, Field(description="Column in target_csv with survival time (survival tasks).")] = None,
@@ -349,15 +359,18 @@ async def predict_ml_model(
     fold_construction_fun -- feeding this tool a test set that wasn't projected into the training
     run's learned feature space will silently score against the wrong features rather than error.
     """
+    def target_col(column: str | None) -> dict | None:
+        return csv_column_arg(target_csv, column, align_to=test_data_csv) if (target_csv and column) else None
+
     args = args_from(
         **{
             "model": rds_element_arg(model_rds, "Model"),
             "test_data": csv_arg(test_data_csv, row_names=1),
-            "target_var": csv_column_arg(target_csv, target_column) if (target_csv and target_column) else None,
+            "target_var": target_col(target_column),
             "trait.positive": lit(trait_positive) if trait_positive else None,
             "task_type": lit(task_type),
-            "time_var": csv_column_arg(target_csv, time_column) if (target_csv and time_column) else None,
-            "event_var": csv_column_arg(target_csv, event_column) if (target_csv and event_column) else None,
+            "time_var": target_col(time_column),
+            "event_var": target_col(event_column),
             "file.name": lit(file_name) if file_name else None,
             "return": lit(True),
         }
@@ -371,66 +384,55 @@ async def predict_ml_model(
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
 async def compute_shap_values(
-    model_rds: Annotated[str, Field(description="result.rds from a prior train_ml_model call. This tool reads its Model element internally.")],
-    data_train_csv: Annotated[str, Field(description="The same training features CSV (or its fold_construction_fun-projected equivalent) used to train model_rds -- SHAP values are computed per cross-validation resample of this training data, not on new/test data.")],
+    model_rds: Annotated[
+        str,
+        Field(
+            description=(
+                "result.rds from a prior train_ml_model call. This tool reads its Model element "
+                "internally; the training samples and features are taken from that model, so no "
+                "data CSV is passed."
+            )
+        ),
+    ],
     ctx: Context,
     output_dir: OutputDir = None,
     session_id: SessionIdParam = None,
     task_type: Annotated[Literal["classification", "survival"], Field(description="Must match the task_type used to train model_rds.")] = "classification",
-    target_column: Annotated[str | None, Field(description="Column in data_train_csv with the classification target -- required for classification.")] = None,
-    trait_positive: Annotated[str | None, Field(description="Value in the target column representing the positive class -- must match what train_ml_model used.")] = None,
-    time_column: Annotated[str | None, Field(description="Column in data_train_csv with survival time -- required for survival.")] = None,
-    event_column: Annotated[str | None, Field(description="Column in data_train_csv with the event indicator -- required for survival.")] = None,
-    n_cores: Annotated[int, Field(ge=1, description="CPU cores for parallel SHAP computation across resamples.")] = 2,
-    file_name: Annotated[str | None, Field(description="File name prefix for a SHAP stability plot -- if unset, no plot is saved.")] = None,
-    fold_models_dir: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Directory of cached per-fold fitted models from a train_ml_model call that used "
-                "fold_construction_fun -- must match that call's own fold_models_dir exactly. "
-                "When given and the cached models are found, this skips refitting a model per "
-                "resample (which would otherwise double the total compute time on top of "
-                "training itself), loading each fold's already-fitted model instead. Leave unset "
-                "if train_ml_model didn't use fold_construction_fun."
-            )
-        ),
-    ] = None,
+    seed: Annotated[int, Field(description="Random seed: SHAP values are Monte Carlo estimates, so the same seed gives the same values.")] = 123,
 ) -> RunResult:
     """Compute per-feature SHAP importance for a trained model (pipeML::compute_shap_values).
 
-    WHAT: SHAP (SHapley Additive exPlanations) values quantify each feature's contribution to
-    each sample's prediction. This computes them per cross-validation resample in parallel (to
-    avoid the bias of evaluating on training data the model already saw), then summarizes with
-    the median per sample -- rather than one single, potentially overfit, in-sample SHAP pass.
+    WHAT: SHAP (SHapley Additive exPlanations) values quantify each feature's contribution to each
+    training sample's prediction, for the final model train_ml_model selected (trained on all
+    training samples) -- so every feature has one fixed definition, including features built by a
+    fold_construction_fun, which are computed once on all training samples. Values are in the units
+    of the model output: probability of the positive class for classification, risk score for
+    survival. For each sample, the baseline (the model's average prediction, in
+    summary.attributes.baseline) plus the sum of its SHAP values equals its prediction.
 
     WHEN: after train_ml_model, to understand which features drive the model's predictions rather
-    than only how accurate it is. Use fold_models_dir to avoid the cost of a full second round of
-    per-fold refitting when training used a custom fold_construction_fun (see that parameter's own
-    description).
+    than only how accurate it is. Global importance = mean absolute SHAP value per feature
+    (column).
 
-    Returns a samples x features data frame of SHAP values. field_glossary is empty for this
-    tool since the return is a single table, not a named list -- inspect result.csv directly.
+    CAVEAT: the final model was trained on the samples it explains, so SHAP describes how the model
+    uses each feature on its training data. With flexible models and small cohorts, an overfit
+    model can assign importance to features that don't generalize -- compare the model's
+    cross-validation performance (train_ml_model) before interpreting the values.
+
+    Returns a samples x features data frame of SHAP values; NULL (with a warning) if the model
+    predicts the same value for every sample.
     """
     args = args_from(
         **{
             "model_trained": rds_element_arg(model_rds, "Model"),
-            "data_train": csv_arg(data_train_csv, row_names=1),
             "task_type": lit(task_type),
-            "target_col": lit(target_column) if target_column else None,
-            "trait.positive": lit(trait_positive) if trait_positive else None,
-            "time_col": lit(time_column) if time_column else None,
-            "event_col": lit(event_column) if event_column else None,
-            "n_cores": lit(n_cores),
-            "file.name": lit(file_name) if file_name else None,
-            "fold_models_dir": lit(fold_models_dir) if fold_models_dir else None,
+            "seed": lit(seed),
         }
     )
     return await _run(
         package="pipeML", function="compute_shap_values", args=args, tool_name="compute_shap_values",
         ctx=ctx, timeout=3600, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
     )
-
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)

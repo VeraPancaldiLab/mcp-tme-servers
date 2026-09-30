@@ -1,6 +1,6 @@
 """RaCInG-server: MCP tools for cell-cell interaction network reconstruction
 
-Wraps three entry points from the RaCInG R package: building the ligand-receptor input matrices from raw counts (prepare_racing_inputs), the fast deterministic kernel-based communication workflow (run_racing_kernel), and the slower Monte Carlo simulation-based workflow (run_racing_montecarlo) for patient-specific cell-cell interaction networks.
+Wraps four entry points from the RaCInG R package: building the ligand-receptor input matrices from raw counts (prepare_racing_inputs), the fast deterministic kernel-based communication workflow (run_racing_kernel), the slower Monte Carlo simulation-based workflow (run_racing_montecarlo) for patient-specific cell-cell interaction networks, and the per-ligand-receptor-pair decomposition of one communication feature (explain_lr_contributions).
 
 Each tool shells out to system R via the shared common/r_bridge.py dispatcher
 (common/r/run_tool.R). RaCInG must already be installed in the system R
@@ -14,10 +14,19 @@ from typing import Annotated, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from mcp_tme_servers.common.paths import server_home
-from mcp_tme_servers.common.r_bridge import args_from, csv_arg, lit, r_function_arg, rds_arg
+from mcp_tme_servers.common.r_bridge import (
+    args_from,
+    csv_arg,
+    lit,
+    r_function_arg,
+    rds_arg,
+    rds_element_arg,
+    rds_element_rownames_arg,
+)
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
     NETWORK_ANNOTATIONS,
@@ -33,7 +42,7 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "RaCInG-server",
     instructions=(
-        'Tools for reconstructing patient-specific cell-cell communication networks from bulk RNAseq and extracting network-motif features from them. Pipeline order: prepare_racing_inputs once, then reuse its result via input_data_rds in run_racing_kernel and/or run_racing_montecarlo (skips recomputing preprocessing). Prefer the kernel method as the default -- it is fast and deterministic; use the Monte Carlo method specifically when you want simulation-based variance/robustness across randomly realized network instances rather than a single point estimate, at a much higher compute cost. Both extract the same feature families -- direct signaling (D), hub-mediated relay (W, wedge), reciprocal three-way coordination (TT, trust triangle), closed three-way feedback loops (CT, cycle triangle, Monte Carlo only), and overall network integration (GSCC) -- from a directed graph built on cell-type abundance and ligand-receptor expression. '
+        'Tools for reconstructing patient-specific cell-cell communication networks from bulk RNAseq and extracting network-motif features from them. Pipeline order: prepare_racing_inputs once, then reuse its result via input_data_rds in run_racing_kernel and/or run_racing_montecarlo (skips recomputing preprocessing). Prefer the kernel method as the default -- it is fast and deterministic; use the Monte Carlo method specifically when you want simulation-based variance/robustness across randomly realized network instances rather than a single point estimate, at a much higher compute cost. To see which ligand-receptor pairs drive a given direct/wedge/triangle feature, call explain_lr_contributions on the same input_data_rds. Both extract the same feature families -- direct signaling (D), hub-mediated relay (W, wedge), reciprocal three-way coordination (TT, trust triangle), closed three-way feedback loops (CT, cycle triangle, Monte Carlo only), and overall network integration (GSCC) -- from a directed graph built on cell-type abundance and ligand-receptor expression. '
         "IMPORTANT -- check for existing inputs before recomputing: prepare_racing_inputs/run_racing_kernel/run_racing_montecarlo can each internally recompute cell-type abundance (deconvolution) rather than needing it precomputed. Before calling any of them, proactively check whether a deconvolution/cell-type abundance result already exists for this same cohort -- e.g. from a prior multideconv-server run_deconvolution/analyze_deconvolution call, or an earlier RaCInG-server session on this same input data. Look for it via that server's get_session_status/prior sessions, or by asking the user whether they already have one. If you locate a candidate, do not pass it in silently -- ask the user to confirm it's the right one for this cohort before using it via deconv_csv (or input_data_rds, which also carries it). If the user doesn't confirm it (or none is found), let deconv_method compute it internally from scratch rather than guessing. "
         'IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to RaCInG itself: van Santvoort M, Lapuente-Santana Ó, Zopoglou M, Zackl C, Finotello F, van der Hoorn P & Eduati F (2025). Mathematically mapping the network of cells in the tumor microenvironment. Cell Reports Methods, 5(2), 100985. '
         'IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user.'
@@ -42,7 +51,7 @@ mcp = MCPServer(
 
 SESSION_CONFIG = SessionConfig(
     sessions_root=server_home("racing") / "runs" / "sessions",
-    stage_by_tool={'prepare_racing_inputs': 'interaction_input_prep', 'run_racing_kernel': 'interaction_kernel', 'run_racing_montecarlo': 'interaction_montecarlo'},
+    stage_by_tool={'prepare_racing_inputs': 'interaction_input_prep', 'run_racing_kernel': 'interaction_kernel', 'run_racing_montecarlo': 'interaction_montecarlo', 'explain_lr_contributions': 'lr_contributions'},
     export_requires=[frozenset({'interaction_input_prep'}), frozenset({'interaction_kernel', 'interaction_montecarlo'})],
     stage_explanations={'interaction_input_prep': "RaCInG input matrices haven't been built yet (prepare_racing_inputs) -- there is nothing to export.", 'interaction_kernel': 'no cell-cell interaction features have been computed yet (run_racing_kernel or run_racing_montecarlo) -- there is nothing to export.', 'interaction_montecarlo': 'no cell-cell interaction features have been computed yet (run_racing_kernel or run_racing_montecarlo) -- there is nothing to export.'},
 )
@@ -113,6 +122,17 @@ _MC_GLOSSARY = {
     ),
 }
 
+_DECONV_CSV_DOC = (
+    "Optional precomputed patient x cell-type abundance CSV. Computed internally if omitted -- "
+    "via multideconv's deconvolution plus subgroup analysis, with each cell type's expression "
+    "profile fitted per method/signature block and then merged, which is the most rigorous "
+    "path. A supplied matrix is instead treated as ONE composition (fractions summing to ~1 per "
+    "patient) when fitting the per-cell-type expression profiles (non-negative least squares), "
+    "so pass a single method's output (e.g. one method/signature block of multideconv-server's "
+    "run_deconvolution), not the concatenated multi-method matrix or analyze_deconvolution's "
+    "harmonized subgroups, which aren't valid compositions."
+)
+
 _INPUT_GLOSSARY = {
     "Lmatrix": "Cell type x ligand matrix: estimated ligand expression per cell type.",
     "Rmatrix": "Cell type x receptor matrix: estimated receptor expression per cell type.",
@@ -132,7 +152,7 @@ async def prepare_racing_inputs(
     ctx: Context,
     output_dir: OutputDir = None,
     session_id: SessionIdParam = None,
-    deconv_csv: Annotated[str | None, Field(description="Optional precomputed patient x cell-type abundance CSV (e.g. from multideconv-server's run_deconvolution); computed via multideconv internally if omitted.")] = None,
+    deconv_csv: Annotated[str | None, Field(description=_DECONV_CSV_DOC)] = None,
     cc_network_csv: Annotated[str | None, Field(description="Optional ligand-receptor prior network CSV (source/target gene symbol columns); fetched from OmniPath via liana (and cached indefinitely) the first time this is called if omitted.")] = None,
     fun_lr: Annotated[Literal["min", "prod"], Field(description="How to combine a ligand's and a receptor's expression into one interaction strength. 'min' (default): the weaker-expressed partner limits the interaction -- a biologically conservative choice, since signaling needs both sides present. 'prod': the product of both -- rewards pairs where both are highly expressed, more sensitive to either partner's magnitude.")] = "min",
     source_column: Annotated[str, Field(description="Ligand identifier column name in cc_network_csv.")] = "source_genesymbol",
@@ -201,7 +221,7 @@ async def run_racing_kernel(
     session_id: SessionIdParam = None,
     counts_csv: Annotated[str | None, Field(description="CSV of RNAseq counts; required unless input_data_rds is given.")] = None,
     input_data_rds: Annotated[str | None, Field(description="result.rds from a prior prepare_racing_inputs call -- prefer this over counts_csv to skip recomputing preprocessing.")] = None,
-    deconv_csv: Annotated[str | None, Field(description="Optional precomputed patient x cell-type abundance CSV; ignored if input_data_rds is given.")] = None,
+    deconv_csv: Annotated[str | None, Field(description=_DECONV_CSV_DOC + " Ignored if input_data_rds is given.")] = None,
     cc_network_csv: Annotated[str | None, Field(description="Optional ligand-receptor prior network CSV; ignored if input_data_rds is given.")] = None,
     fun_lr: Annotated[Literal["min", "prod"], Field(description="How to combine ligand/receptor expression into interaction strength; only used when computing inputs from counts_csv.")] = "min",
     source_column: str = "source_genesymbol",
@@ -246,6 +266,9 @@ async def run_racing_kernel(
             "input_data": rds_arg(input_data_rds) if input_data_rds else None,
             "deconv": csv_arg(deconv_csv, row_names=1) if (deconv_csv and not input_data_rds) else None,
             "cc_network": csv_arg(cc_network_csv, row_names=None) if (cc_network_csv and not input_data_rds) else None,
+            # Upstream defaults output_folder to a hardcoded ~/Documents/racing/vignettes/: keep the
+            # intermediate input files inside this call's run_dir instead
+            "output_folder": lit("Results/"),
             "fun_LR": r_function_arg(fun_lr),
             "source": lit(source_column),
             "target": lit(target_column),
@@ -275,7 +298,7 @@ async def run_racing_montecarlo(
     session_id: SessionIdParam = None,
     counts_csv: Annotated[str | None, Field(description="CSV of RNAseq counts; required unless input_data_rds is given.")] = None,
     input_data_rds: Annotated[str | None, Field(description="result.rds from a prior prepare_racing_inputs call -- prefer this over counts_csv to skip recomputing preprocessing.")] = None,
-    deconv_csv: Annotated[str | None, Field(description="Optional precomputed patient x cell-type abundance CSV; ignored if input_data_rds is given.")] = None,
+    deconv_csv: Annotated[str | None, Field(description=_DECONV_CSV_DOC + " Ignored if input_data_rds is given.")] = None,
     cc_network_csv: Annotated[str | None, Field(description="Optional ligand-receptor prior network CSV; ignored if input_data_rds is given.")] = None,
     fun_lr: Literal["min", "prod"] = "min",
     source_column: str = "source_genesymbol",
@@ -325,6 +348,7 @@ async def run_racing_montecarlo(
             "input_data": rds_arg(input_data_rds) if input_data_rds else None,
             "deconv": csv_arg(deconv_csv, row_names=1) if (deconv_csv and not input_data_rds) else None,
             "cc_network": csv_arg(cc_network_csv, row_names=None) if (cc_network_csv and not input_data_rds) else None,
+            "output_folder": lit("Results/"),  # see run_racing_kernel
             "fun_LR": r_function_arg(fun_lr),
             "source": lit(source_column),
             "target": lit(target_column),
@@ -346,6 +370,100 @@ async def run_racing_montecarlo(
         package="RaCInG", function="compute_racing_montecarlo", args=args, tool_name="run_racing_montecarlo",
         ctx=ctx, timeout=28800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary=_MC_GLOSSARY,
+    )
+
+
+_LR_FUNCTIONS = {
+    "direct": "computeLRContributions",
+    "wedge": "computeWedgeLRContributions",
+    "triangle": "computeTriangleLRContributions",
+}
+
+
+def _lr_diagnostics(summary: dict) -> list[str]:
+    if summary.get("class") != "NULL":
+        return []
+    return [
+        "No ligand-receptor pair connects these cell types in any patient -- check the names "
+        "against the input's celltypes, or pick a feature run_racing_kernel actually returned."
+    ]
+
+
+@mcp.tool(annotations=NETWORK_ANNOTATIONS)
+async def explain_lr_contributions(
+    input_data_rds: Annotated[str, Field(description="result.rds from a prior prepare_racing_inputs call (the same input the kernel/Monte Carlo tools use).")],
+    motif: Annotated[
+        Literal["direct", "wedge", "triangle"],
+        Field(
+            description=(
+                "Which communication feature to decompose: 'direct' (D, sender -> receiver), 'wedge' "
+                "(W, two leaves relayed through a hub) or 'triangle' (TT, three mutually communicating "
+                "cell types)."
+            )
+        ),
+    ],
+    cell_types: Annotated[
+        list[str],
+        Field(
+            min_length=2,
+            max_length=3,
+            description=(
+                "The cell types of the feature, as named in the input's celltypes: [sender, receiver] "
+                "for 'direct'; [leaf_i, hub_j, leaf_k] for 'wedge' (the hub in the middle); [i, j, k] "
+                "for 'triangle'. The column names of run_racing_kernel's features name them."
+            )
+        ),
+    ],
+    ctx: Context,
+    output_dir: OutputDir = None,
+    session_id: SessionIdParam = None,
+    bundle: Annotated[bool, Field(description="'direct' only: pool both directions (sender -> receiver and back) into one edge, matching run_racing_kernel's default remove_direction=True features. False keeps only sender -> receiver.")] = True,
+    top_n: Annotated[int | None, Field(ge=1, description="Keep only the top N ligand-receptor pairs per patient (by contribution); all nonzero pairs if unset.")] = None,
+) -> RunResult:
+    """Break a cell-cell communication feature down into the ligand-receptor pairs driving it
+    (RaCInG::computeLRContributions / computeWedgeLRContributions / computeTriangleLRContributions).
+
+    WHAT: the kernel sums every ligand-receptor pair into one number per cell-type pair, so a
+    feature like "CD8 T cells -> macrophages" loses which signals make it up. Because that sum is
+    linear, each pair's term can be computed exactly: for 'direct', the contributions add back up
+    to the kernel's raw score. Wedges and triangles multiply edges rather than sum them, so there
+    each edge is decomposed separately and PctOfTotal is relative to that edge.
+
+    WHEN: after run_racing_kernel (or pipeML-server/SHAP) singles out an interesting feature, to
+    ask which ligand-receptor pairs explain it -- e.g. whether a strong CD8 -> tumor edge is
+    driven by checkpoint ligands or by cytokines -- and whether that differs between patients.
+
+    Returns a data frame with one row per patient, ligand-receptor pair and edge: Patient, Edge
+    (rows sharing it share one PctOfTotal denominator), Sender, Receiver, Ligand, Receptor,
+    Contribution (in the units of the raw kernel score) and PctOfTotal (that pair's share of the
+    edge's score for that patient); wedges add Path. Pairs contributing exactly zero are omitted,
+    and a NULL result means no pair connects those cell types in any patient.
+    """
+    expected = 2 if motif == "direct" else 3
+    if len(cell_types) != expected:
+        raise ToolError(f"motif '{motif}' needs exactly {expected} cell_types, got {len(cell_types)}.")
+
+    if motif == "direct":
+        cells = {"sender": lit(cell_types[0]), "receiver": lit(cell_types[1]), "bundle": lit(bundle)}
+    else:
+        cells = {"i": lit(cell_types[0]), "j": lit(cell_types[1]), "k": lit(cell_types[2])}
+
+    args = args_from(
+        **{
+            "Lmatrix": rds_element_arg(input_data_rds, "Lmatrix"),
+            "Rmatrix": rds_element_arg(input_data_rds, "Rmatrix"),
+            "Cmatrix": rds_element_arg(input_data_rds, "Cmatrix"),
+            "LRmatrix": rds_element_arg(input_data_rds, "LRmatrix"),
+            "celltypes": rds_element_arg(input_data_rds, "celltypes"),
+            **cells,
+            "patient_names": rds_element_rownames_arg(input_data_rds, "Cmatrix"),
+            "top_n": lit(top_n) if top_n is not None else None,
+        }
+    )
+    return await _run(
+        package="RaCInG", function=_LR_FUNCTIONS[motif], args=args, tool_name="explain_lr_contributions",
+        ctx=ctx, timeout=1800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        diagnostics=_lr_diagnostics,
     )
 
 

@@ -52,3 +52,30 @@ async def test_run_celltfusion_and_session_lifecycle(client: Client) -> None:
 
     status = await client.call_tool("get_session_status", {"session_id": sid})
     assert status.structured_content["export_ready"] is True
+
+
+@pytest.mark.anyio
+async def test_input_validation_is_upfront(client: Client) -> None:
+    counts = str(DATA / "celltfusion_raw_counts_small.csv")
+    cases = [
+        ({"batch": True}, "batch=True needs coldata_csv"),
+        ({"deconv_methods": ["Epidish", "CBSX"]}, "cbsx_mail/cbsx_token"),
+        ({"tf_collection": "ARACNE"}, "needs aracne_network_file"),
+        ({"tf_collection": "ARACNE", "aracne_network_file": str(DATA / "missing_network.txt")}, "not found"),
+    ]
+    for extra, message in cases:
+        result = await client.call_tool("run_celltfusion", {"raw_counts_csv": counts, **extra})
+        assert result.is_error, extra
+        assert message in result.content[0].text, (extra, result.content[0].text)
+
+
+@pytest.mark.anyio
+async def test_unsupported_cancer_type_is_rejected(client: Client) -> None:
+    # Only cancer types with a bundled TCGA meta-program reference are accepted.
+    try:
+        result = await client.call_tool(
+            "run_celltfusion", {"raw_counts_csv": str(DATA / "celltfusion_raw_counts_small.csv"), "cancer_type": "brca"}
+        )
+    except Exception:
+        return
+    assert result.is_error

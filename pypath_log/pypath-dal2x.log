@@ -1,0 +1,5 @@
+[2026-09-30 02:35:52] Welcome!
+[2026-09-30 02:35:52] Logger started, logging into `/home/marcelo.hurtado/Documents/mcp-tme-servers/pypath_log/pypath-dal2x.log`.
+[2026-09-30 02:35:52] Session `dal2x` started.
+[2026-09-30 02:35:52] Config has been read from the following files:
+[2026-09-30 02:35:52]   - /home/marcelo.hurtado/.cache/uv/archive-v0/s0zCSSDQETMlPbUE/lib/python3.10/site-packages/pypath_common/data/settings.yaml

@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import time
-import uuid
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -23,7 +21,7 @@ from pydantic import Field
 
 from mcp_tme_servers.common.paths import server_home
 from mcp_tme_servers.common.r_bridge import args_from, csv_arg, csv_column_arg, lit, named_args_arg, rds_arg
-from mcp_tme_servers.common.session import Session, SessionConfig, SessionError
+from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
     READ_ANNOTATIONS,
     OutputDir,
@@ -31,6 +29,7 @@ from mcp_tme_servers.common.tools import (
     SessionIdParam,
     make_run,
     register_session_tools,
+    resolve_output_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,7 +212,7 @@ async def run_deconvolution(
     ] = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS", "CBSX"],
     credentials_mail: Annotated[
         str | None,
-        Field(description="CIBERSORTx account email, required (with credentials_token) to run the CBSX method (included in methods by default). Register for free at https://cibersortx.stanford.edu if the user doesn't already have an account."),
+        Field(description="CIBERSORTx account email, required (with credentials_token) to run the CBSX method (included in methods by default) -- without both, multideconv skips CBSX with a warning. Register for free at https://cibersortx.stanford.edu if the user doesn't already have an account."),
     ] = None,
     credentials_token: Annotated[
         str | None,
@@ -338,25 +337,19 @@ async def run_deconvolution(
         methods and credentials_mail/credentials_token filled in.
       - Don't silently drop CBSX and don't silently run without asking -- CBSX being in the
         default set is intentional and should stay the default whenever credentials are or
-        become available.
+        become available. Note that multideconv itself no longer fails when CBSX is requested
+        without credentials: it emits an R warning and skips CBSX (the call fails only if no
+        method at all produced results), so a run without credentials silently lacks CBSX
+        columns -- all the more reason to ask first.
 
     Returns a samples x features matrix of cell-type proportions.
     """
     if custom_signature_files:
-        if output_dir is not None:
-            resolved_output_dir = output_dir
-        elif session_id is not None:
-            try:
-                session = Session.load(SESSION_CONFIG, session_id)
-            except SessionError as e:
-                raise ToolError(str(e)) from e
-            resolved_output_dir = str(session.run_dir_for("run_deconvolution"))
-        else:
-            resolved_output_dir = str(
-                server_home("multideconv") / "runs" /
-                f"run_deconvolution_{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
-            )
-        dest = Path(resolved_output_dir).expanduser().resolve() / "Results" / "custom_signatures"
+        resolved_output_dir = resolve_output_dir(
+            runs_root=server_home("multideconv") / "runs", tool_name="run_deconvolution",
+            output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        )
+        dest = Path(resolved_output_dir) / "Results" / "custom_signatures"
         dest.mkdir(parents=True, exist_ok=True)
         for src in custom_signature_files:
             src_path = Path(src).expanduser().resolve()
@@ -421,14 +414,14 @@ async def analyze_deconvolution(
     corr_type: Annotated[Literal["spearman", "pearson"], Field(description="Correlation type for subgroup clustering. Spearman (rank-based, default) is more robust to the non-normal, right-skewed distributions typical of deconvolution proportions.")] = "spearman",
     zero_thr: Annotated[float, Field(ge=0, le=1, description="Maximum fraction of samples allowed to be zero for a feature before it's discarded as unreliably estimated in this cohort.")] = 0.9,
     var_quantile: Annotated[float, Field(ge=0, le=1, description="Quantile threshold below which near-constant (uninformative) features are removed.")] = 0.25,
-    prune_thr: Annotated[float, Field(ge=0, le=1, description="Pearson correlation above which within-subgroup feature pairs are pruned as redundant duplicates rather than kept separately.")] = 0.9,
+    prune_thr: Annotated[float, Field(ge=0, le=1, description="Correlation (computed with corr_type, and partial on batch if batch_csv is given) above which features of the same cell type are pruned as redundant duplicates rather than kept separately.")] = 0.9,
     seed: Annotated[int | None, Field(description="Seed for reproducible tie-breaking when choosing which of several highly correlated features to keep.")] = None,
     batch_csv: Annotated[
         str | None,
         Field(
             description=(
-                "Optional CSV with a batch/cohort covariate column, row-aligned to "
-                "deconvolution_csv. When given (with batch_column), correlations are computed as "
+                "Optional CSV with a batch/cohort covariate column, matched to "
+                "deconvolution_csv's samples by row name (first column). When given (with batch_column), correlations are computed as "
                 "*partial* correlations controlling for batch -- use this for multi-cohort data "
                 "so that cohort-driven co-variation isn't mistaken for genuine cross-method "
                 "agreement about a cell type."
@@ -469,7 +462,7 @@ async def analyze_deconvolution(
             "var_quantile": lit(var_quantile),
             "prune_thr": lit(prune_thr),
             "seed": lit(seed) if seed is not None else None,
-            "batch": csv_column_arg(batch_csv, batch_column) if (batch_csv and batch_column) else None,
+            "batch": csv_column_arg(batch_csv, batch_column, align_to=deconvolution_csv) if (batch_csv and batch_column) else None,
             "cells_extra": lit(cells_extra) if cells_extra else None,
             "file_name": lit(file_name) if file_name else None,
             "return": lit(True),
@@ -510,6 +503,9 @@ async def benchmark_deconvolution(
     WHEN: use this to choose which method(s)/signature(s) to trust for a given tissue/technology
     before committing to them for a cohort where the truth is unknown -- not part of the main
     run_deconvolution -> analyze_deconvolution -> ... pipeline itself.
+
+    Samples are matched between the two CSVs by row name: samples missing from groundtruth_csv
+    are dropped with an R warning (see log_tail), and the call fails if no sample names are shared.
 
     Returns a correlation matrix; low correlations can mean either genuinely poor deconvolution
     performance or a silent cell-type name mismatch between the two inputs (see warnings).
@@ -623,9 +619,11 @@ async def prepare_deconvolution_folds(
                 "Raw (unharmonized) deconvolution matrix CSV (samples as rows, features as "
                 "columns) from run_deconvolution's result.csv -- the same input shape "
                 "analyze_deconvolution takes. For classification, this CSV must already include "
-                "a literal 'target' column with each sample's class label (add one before "
-                "calling if it isn't there yet). For survival, leave target out and use "
-                "target_csv/time_column/event_column instead."
+                "the outcome as extra columns: a literal 'target' column with each sample's class "
+                "label (classification), or 'time' and 'event' columns (survival; event 1 = "
+                "event occurred, 0 = censored) -- add them before calling if they aren't there "
+                "yet. These outcome columns are kept out of the harmonization and added back to "
+                "the returned train/test data, exactly as pipeML hands them to this function."
             )
         ),
     ],
@@ -636,14 +634,14 @@ async def prepare_deconvolution_folds(
         bool,
         Field(
             description=(
-                "If True (default, and currently the only working path -- see the known upstream "
-                "bug noted below), harmonizes deconvolution_csv once across its whole cohort, "
+                "If True (default), harmonizes deconvolution_csv once across its whole cohort, "
                 "attaching target/time/event -- equivalent to what pipeML's fold_construction_fun "
                 "contract does on its own final full-data refit after cross-validation. If False, "
-                "instead constructs per-fold training/test subsets using folds (see that "
-                "parameter) -- the code path this function is actually meant for when driven by "
-                "pipeML-server's train_ml_model(fold_construction_fun='prepare_multideconv_folds'), "
-                "but it currently has an upstream bug that makes it return nothing usable."
+                "instead constructs per-fold training/test subsets using folds (required, see that "
+                "parameter) -- the code path pipeML-server's "
+                "train_ml_model(fold_construction_fun='prepare_multideconv_folds') drives per fold: "
+                "each fold's training rows are harmonized and its held-out rows projected into "
+                "that fold's own subgroups (via replicate_subgroups' logic)."
             )
         ),
     ] = True,
@@ -660,11 +658,7 @@ async def prepare_deconvolution_folds(
             )
         ),
     ] = None,
-    target_csv: Annotated[str | None, Field(description="CSV with time_column/event_column, row-aligned to deconvolution_csv -- survival tasks only.")] = None,
-    time_column: Annotated[str | None, Field(description="Column in target_csv with survival time -- survival tasks only, instead of a 'target' column in deconvolution_csv.")] = None,
-    event_column: Annotated[str | None, Field(description="Column in target_csv with the event indicator -- survival tasks only.")] = None,
-    trait_positive: Annotated[str | None, Field(description="Value in the event column that represents event=1 -- survival tasks only.")] = None,
-    ncores: Annotated[int | None, Field(description="CPU cores for parallel fold processing when compute_full_dataset=False; default detectCores()-2.")] = None,
+    ncores: Annotated[int | None, Field(ge=1, description="CPU cores for parallel fold processing when compute_full_dataset=False; default detectCores()-2 (at least 1).")] = None,
     cells_extra: CellTypeList = None,
     corr: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's corr -- minimum correlation for merging method/signature estimates into a subgroup.")] = 0.7,
     corr_type: Annotated[Literal["spearman", "pearson"], Field(description="Same as analyze_deconvolution's corr_type.")] = "spearman",
@@ -672,7 +666,7 @@ async def prepare_deconvolution_folds(
     var_quantile: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's var_quantile.")] = 0.25,
     prune_thr: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's prune_thr.")] = 0.9,
     seed: Annotated[int | None, Field(description="Same as analyze_deconvolution's seed.")] = None,
-    batch_csv: Annotated[str | None, Field(description="Optional CSV with a batch/cohort covariate column, row-aligned to deconvolution_csv -- same partial-correlation behavior as analyze_deconvolution's batch_csv.")] = None,
+    batch_csv: Annotated[str | None, Field(description="Optional CSV with a batch/cohort covariate column, matched to deconvolution_csv's samples by row name -- same partial-correlation behavior as analyze_deconvolution's batch_csv.")] = None,
     batch_column: Annotated[str | None, Field(description="Column in batch_csv identifying each sample's batch/cohort.")] = None,
 ) -> RunResult:
     """Inspect what pipeML's custom fold-construction integration would train on
@@ -689,25 +683,23 @@ async def prepare_deconvolution_folds(
     check what the deconvolution harmonization would actually produce for this cohort -- or
     afterwards, to inspect a specific fold's output directly.
 
-    TEMP: known upstream bug -- when compute_full_dataset=False (the per-fold path), this function
-    computes and saves each fold's processed data to Results/fold_*.rds but returns NULL instead
-    of the fold list, due to a missing return() statement in multideconv::prepare_multideconv_folds.
-    The fold files are still written and listed under output_files, but this tool's own
-    summary/result.rds will show an empty NULL result rather than the fold data -- and this also
-    means train_ml_model(fold_construction_fun="prepare_multideconv_folds") will currently break
-    once it reaches this same per-fold path during cross-validation. A fix is pending in the
-    multideconv package; remove this warning once confirmed fixed. compute_full_dataset=True (the
-    default) uses a different, unaffected code path.
+    Returns, with compute_full_dataset=True, an unnamed list of (1) the harmonized feature matrix
+    with target (or time/event) attached, (2) the full analyze_deconvolution-style result, and
+    (3) the bestune marker. With compute_full_dataset=False, a list named by fold, each with
+    train_data (harmonized training rows + the outcome columns), test_data (held-out rows
+    projected into that fold's subgroups, plus time/event for survival), obs_test (class labels,
+    or a time/event data frame for survival), rowIndex, and fold_name -- each fold is also saved to
+    run_dir/Results/fold_<name>.rds (stale fold_*.rds from earlier runs in the same run_dir are
+    removed first).
     """
+    if not compute_full_dataset and not folds:
+        raise ToolError("folds is required when compute_full_dataset=False (fold name -> 1-indexed training rows).")
     args = args_from(
         **{
             "data": csv_arg(deconvolution_csv, row_names=1),
             "folds": named_args_arg(folds) if folds else None,
             "bestune": lit(True) if compute_full_dataset else None,
             "ncores": lit(ncores) if ncores is not None else None,
-            "time_var": csv_column_arg(target_csv, time_column) if (target_csv and time_column) else None,
-            "event_var": csv_column_arg(target_csv, event_column) if (target_csv and event_column) else None,
-            "trait.positive": lit(trait_positive) if trait_positive else None,
             "cells_extra": lit(cells_extra) if cells_extra else None,
             "corr": lit(corr),
             "corr_type": lit(corr_type),
@@ -715,7 +707,7 @@ async def prepare_deconvolution_folds(
             "var_quantile": lit(var_quantile),
             "prune_thr": lit(prune_thr),
             "seed": lit(seed) if seed is not None else None,
-            "batch": csv_column_arg(batch_csv, batch_column) if (batch_csv and batch_column) else None,
+            "batch": csv_column_arg(batch_csv, batch_column, align_to=deconvolution_csv) if (batch_csv and batch_column) else None,
         }
     )
     return await _run(
