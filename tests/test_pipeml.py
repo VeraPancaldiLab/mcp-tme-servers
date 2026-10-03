@@ -1,10 +1,12 @@
 """In-process regression tests for the pipeML server."""
 
+import csv
 from pathlib import Path
 
 import pytest
 from mcp import Client
 
+from mcp_tme_servers.celltfusion.server import mcp as celltfusion_mcp
 from mcp_tme_servers.pipeml.server import mcp
 
 DATA = Path(__file__).parent / "data"
@@ -192,8 +194,12 @@ async def test_custom_folds_train_then_shap(client: Client) -> None:
             "k_folds": 3,
             "n_rep": 1,
             "ncores": 2,
+            # Only 10 training samples per fold: with some seeds a treebag bootstrap sample holds a
+            # single class and rpart fails, which aborts pipeML's whole custom-fold run. Seed 2 is
+            # one where every algorithm fits (checked against multideconv 0.2.0's features).
+            "seed": 2,
             "fold_construction_fun": "prepare_multideconv_folds",
-            "fold_construction_args_fixed": {"ncores": 2},
+            "fold_construction_args_fixed": {"ncores": 2, "cv_thr": 0.1},
         },
     )
     assert not training.is_error, training.content[0].text
@@ -240,7 +246,14 @@ async def test_survival_train_predict_shap(client: Client) -> None:
     model_rds = str(Path(sc["run_dir"]) / "result.rds")
 
     predicted = await client.call_tool(
-        "predict_ml_model", {"model_rds": model_rds, "test_data_csv": str(DATA / "ml_survival_features.csv"), **survival}
+        "predict_ml_model",
+        {
+            "model_rds": model_rds,
+            "test_data_csv": str(DATA / "ml_survival_features.csv"),
+            **survival,
+            "n_groups": 3,  # low / medium / high risk Kaplan-Meier groups
+            "file_name": "pytest_km",
+        },
     )
     assert not predicted.is_error, predicted.content[0].text
     assert "c_index" in predicted.structured_content["summary"]["names"]
@@ -248,3 +261,109 @@ async def test_survival_train_predict_shap(client: Client) -> None:
     shap = await client.call_tool("compute_shap_values", {"model_rds": model_rds, "task_type": "survival"})
     assert not shap.is_error, shap.content[0].text
     assert shap.structured_content["summary"]["dim"] == [80, 8]
+
+
+CELLTFUSION_FOLD_ARGS = {
+    "features_train_csv": str(DATA / "celltfusion_raw_counts_small.csv"),  # genes x samples
+    "features_as_rows": True,
+    "task_type": "classification",
+    "target_csv": str(DATA / "celltfusion_coldata_small.csv"),  # samples in reverse order
+    "target_column": "target",
+    "trait_positive": "R",
+    "k_folds": 3,
+    "n_rep": 1,
+    "ncores": 2,
+    "fold_construction_fun": "prepare_celltfusion_folds",
+    "fold_deconv_csv": str(DATA / "celltfusion_deconv_small.csv"),
+    "fold_construction_args_fixed": {"min_targets_size": 5, "minMod": 5},
+}
+
+
+@pytest.mark.anyio
+async def test_celltfusion_fold_validation(client: Client) -> None:
+    cases = [
+        ({"fold_deconv_csv": None}, "needs fold_deconv_csv"),
+        ({"fold_construction_args_tunable": {"corr": [0.6, 0.8]}}, "doesn't support fold_construction_args_tunable"),
+        ({"fold_construction_args_fixed": {"dt": "x"}}, "must be computed within each fold"),
+        ({"fold_construction_args_fixed": {"deconv": "x"}}, "pass it via fold_deconv_csv"),
+        ({"fold_construction_args_fixed": {"batch": True, "batch_id": "cohort"}}, "needs fold_coldata_csv"),
+        ({"fold_construction_args_fixed": {"TF.collection": "ARACNE"}}, "ARACNE"),
+        ({"fold_construction_fun": "prepare_multideconv_folds"}, "only used with fold_construction_fun='prepare_celltfusion_folds'"),
+    ]
+    for extra, message in cases:
+        result = await client.call_tool("train_ml_model", {**CELLTFUSION_FOLD_ARGS, **extra})
+        assert result.is_error, extra
+        assert message in result.content[0].text, (extra, result.content[0].text)
+
+
+@pytest.mark.anyio
+async def test_celltfusion_custom_folds_train_project_predict_shap(client: Client) -> None:
+    # Leakage-free CellTFusion features end to end: CellTFusion reruns per fold inside pipeML, the
+    # test cohort is projected onto the final model's latent factors, then scored and explained.
+    training = await client.call_tool("train_ml_model", CELLTFUSION_FOLD_ARGS)
+    assert not training.is_error, training.content[0].text
+    sc = training.structured_content
+    assert "Custom_output" in sc["summary"]["names"]
+    assert "project_celltfusion_factors" in sc["field_glossary"]["Custom_output"]
+    model_rds = str(Path(sc["run_dir"]) / "result.rds")
+
+    async with Client(celltfusion_mcp, raise_exceptions=True) as ctf:
+        projected = await ctf.call_tool(
+            "project_celltfusion_factors",
+            {"model_rds": model_rds, "deconvolution_test_csv": str(DATA / "celltfusion_deconv_small.csv")},
+        )
+    assert not projected.is_error, projected.content[0].text
+    psc = projected.structured_content
+    assert psc["summary"]["dim"][0] == 24
+    assert all(c.startswith("Factor") for c in psc["summary"]["colnames"])
+
+    predicted = await client.call_tool(
+        "predict_ml_model",
+        {
+            "model_rds": model_rds,
+            "test_data_csv": str(Path(psc["run_dir"]) / psc["csv_outputs"]["result"]),
+            "task_type": "classification",
+            "target_csv": str(DATA / "celltfusion_coldata_small.csv"),
+            "target_column": "target",
+            "trait_positive": "R",
+        },
+    )
+    assert not predicted.is_error, predicted.content[0].text
+    assert "AUC" in predicted.structured_content["summary"]["names"]
+
+    shap = await client.call_tool("compute_shap_values", {"model_rds": model_rds, "task_type": "classification"})
+    assert not shap.is_error, shap.content[0].text
+    assert shap.structured_content["summary"]["dim"][0] == 24
+
+
+@pytest.mark.anyio
+async def test_training_input_validation(client: Client) -> None:
+    survival = {
+        "features_train_csv": str(DATA / "ml_survival_features.csv"),
+        "task_type": "survival",
+        "target_csv": str(DATA / "ml_survival.csv"),
+        "time_column": "time",
+    }
+    cases = [
+        ({**TRAIN_ARGS, "lodo": True}, "lodo=True needs batch_csv"),
+        # pipeML itself: events must be coded 0/1 ('sex' is 1/2), and the positive class must exist
+        ({**survival, "event_column": "sex"}, "must be coded 1 = event, 0 = censored"),
+        ({**TRAIN_ARGS, "trait_positive": "absent"}, "with and without `trait.positive`"),
+    ]
+    for args, message in cases:
+        result = await client.call_tool("train_ml_model", args)
+        assert result.is_error, args
+        assert message in result.content[0].text, result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_train_without_preprocessing_keeps_all_features(client: Client) -> None:
+    # preprocess=False trains on the features as given: no near-constant / correlated-feature filter.
+    training = await client.call_tool("train_ml_model", {**TRAIN_ARGS, "preprocess": False})
+    assert not training.is_error, training.content[0].text
+    model_rds = str(Path(training.structured_content["run_dir"]) / "result.rds")
+    shap = await client.call_tool("compute_shap_values", {"model_rds": model_rds, "task_type": "classification"})
+    assert not shap.is_error, shap.content[0].text
+    with open(DATA / "ml_features_train.csv", newline="") as fh:
+        n_features = len(next(csv.reader(fh))) - 1
+    assert shap.structured_content["summary"]["dim"] == [40, n_features]

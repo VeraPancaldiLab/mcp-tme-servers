@@ -26,8 +26,11 @@
 # for a parameter that expects an actual R function object), "named_args" (a
 # named list of heterogeneously-typed values, e.g. for pipeML's
 # fold_construction_args_fixed, meant to be spliced into another call via
-# do.call() rather than passed as one argument). See common/r_bridge.py for
-# the Python-side constructors.
+# do.call() rather than passed as one argument; an entry may itself be a
+# typed spec, resolved first). A "csv" spec can also be transposed, reordered
+# to another CSV's samples ("align_to") and extended with "add_columns";
+# "csv_column" can be aligned the same way. See common/r_bridge.py for the
+# Python-side constructors.
 #
 # "package" is an installed R package; "function" is looked up in it via
 # asNamespace(). All five servers in this repo (multideconv, pipeML,
@@ -59,6 +62,27 @@ dir.create(file.path(workdir, "Results"), recursive = TRUE, showWarnings = FALSE
 
 is_scalarish <- function(v) is.character(v) || is.numeric(v) || is.logical(v) || is.null(v)
 
+# Sample IDs of a CSV: its row names, or its column names (e.g. a genes x samples counts CSV)
+csv_sample_ids <- function(path, columns = FALSE) {
+  if (isTRUE(columns)) {
+    return(colnames(utils::read.csv(path, row.names = 1, check.names = FALSE, nrows = 1)))
+  }
+  rownames(utils::read.csv(path, row.names = 1, check.names = FALSE))
+}
+
+# Positions of `ids` within `have` (the samples of `from`), for following another CSV's sample
+# order. Falls back to the given order when some IDs are missing but both have the same number
+# of samples (the old positional contract); errors when neither is possible.
+match_samples <- function(have, ids, from, to, what) {
+  missing_ids <- setdiff(ids, have)
+  if (length(missing_ids) == 0) return(match(ids, have))
+  if (length(have) == length(ids)) return(seq_along(have))
+  stop(length(missing_ids), " sample(s) of ", basename(to), " are missing from ", basename(from),
+       " (e.g. ", paste(utils::head(missing_ids, 5), collapse = ", "),
+       "), and the two files have different numbers of samples, so ", what,
+       " cannot be matched to them")
+}
+
 resolve_arg <- function(spec) {
   if (is.null(spec)) return(NULL)
   type <- spec[["__type__"]]
@@ -77,6 +101,18 @@ resolve_arg <- function(spec) {
     row_names <- spec$row_names
     if (is.null(row_names)) row_names <- NULL else row_names <- as.integer(row_names)
     df <- utils::read.csv(spec$path, row.names = row_names, check.names = FALSE)
+    if (isTRUE(spec$transpose)) df <- as.data.frame(t(as.matrix(df)), optional = TRUE)
+    if (!is.null(spec$align_to)) {
+      ids <- csv_sample_ids(spec$align_to, spec$align_to_columns)
+      df <- df[match_samples(rownames(df), ids, spec$path, spec$align_to, "its rows"), , drop = FALSE]
+    }
+    for (nm in names(spec$add_columns)) {
+      values <- resolve_arg(spec$add_columns[[nm]])
+      if (length(values) != nrow(df)) {
+        stop("Column '", nm, "' has ", length(values), " values for ", nrow(df), " samples of ", basename(spec$path))
+      }
+      df[[nm]] <- unname(values)
+    }
     if (isTRUE(spec$as_matrix)) df <- as.matrix(df)
     return(df)
   }
@@ -89,19 +125,12 @@ resolve_arg <- function(spec) {
       stop("Column '", spec$column, "' not found in ", spec$path)
     }
     col <- df[[spec$column]]
+    if (isTRUE(spec$as_character)) col <- as.character(col)
     names(col) <- rownames(df)
-    # Optionally follow another CSV's sample order (row names) instead of this one's
+    # Optionally follow another CSV's sample order instead of this one's
     if (!is.null(spec$align_to)) {
-      ids <- rownames(utils::read.csv(spec$align_to, row.names = 1, check.names = FALSE))
-      missing_ids <- setdiff(ids, names(col))
-      if (length(missing_ids) == 0) {
-        col <- col[ids]
-      } else if (length(col) != length(ids)) {
-        stop(length(missing_ids), " sample(s) of ", basename(spec$align_to), " are missing from the row names of ",
-             basename(spec$path), " (e.g. ", paste(utils::head(missing_ids, 5), collapse = ", "),
-             "), and the two files have different numbers of rows, so '", spec$column,
-             "' cannot be matched to them")
-      }
+      ids <- csv_sample_ids(spec$align_to, spec$align_to_columns)
+      col <- col[match_samples(names(col), ids, spec$path, spec$align_to, paste0("'", spec$column, "'"))]
     }
     return(col)
   }
@@ -143,6 +172,8 @@ resolve_arg <- function(spec) {
     val <- spec$value
     if (is.null(val)) return(list())
     val <- lapply(val, function(v) {
+      # A nested arg spec (e.g. a csv_arg for a data-valued argument) is resolved into its R object
+      if (is.list(v) && !is.null(v[["__type__"]])) return(resolve_arg(v))
       if (is.list(v)) {
         scalar <- all(vapply(v, is_scalarish, logical(1)))
         if (scalar) v <- unlist(v)
@@ -271,6 +302,15 @@ if (!is_error) {
         fname <- paste0("result_", make.names(nm), ".csv")
         write_if_tabular(el, file.path(workdir, fname))
         csv_outputs[[nm]] <- fname
+      } else if (identical(class(el), "list") && length(el) > 0 && !is.null(names(el)) &&
+                 all(vapply(el, function(z) is.data.frame(z) || is.matrix(z), logical(1)))) {
+        # A plain named list holding only tables (e.g. multideconv's per-cell-type
+        # correlations/pvalues): one CSV per table, keyed "<element>/<table>"
+        for (sub in names(el)) {
+          fname <- paste0("result_", make.names(nm), "_", make.names(sub), ".csv")
+          write_if_tabular(el[[sub]], file.path(workdir, fname))
+          csv_outputs[[paste0(nm, "/", sub)]] <- fname
+        }
       }
     }
   }

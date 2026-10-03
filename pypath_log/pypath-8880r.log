@@ -1,0 +1,5 @@
+[2026-10-02 02:36:23] Welcome!
+[2026-10-02 02:36:23] Logger started, logging into `/home/marcelo.hurtado/Documents/mcp-tme-servers/pypath_log/pypath-8880r.log`.
+[2026-10-02 02:36:23] Session `8880r` started.
+[2026-10-02 02:36:23] Config has been read from the following files:
+[2026-10-02 02:36:23]   - /home/marcelo.hurtado/.cache/uv/archive-v0/qFsf_ESACW8FT8hs/lib/python3.10/site-packages/pypath_common/data/settings.yaml

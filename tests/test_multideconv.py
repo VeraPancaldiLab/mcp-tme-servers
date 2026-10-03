@@ -177,3 +177,110 @@ async def test_prepare_deconvolution_folds_survival(client: Client) -> None:
     assert full.structured_content["summary"]["class"] == "list"
     if features is not None:
         assert features["dim"][0] == 15  # all samples, outcome columns re-attached at the end
+
+
+@pytest.mark.anyio
+async def test_analyze_deconvolution_v020_output(client: Client) -> None:
+    # multideconv 0.2.0: complete-linkage subgroups named <CellType>_Subgroup.<i> (no .Iteration.),
+    # CV-based low-variance filter (cv_thr), no pruning step -> 6 output elements.
+    result = await client.call_tool(
+        "analyze_deconvolution",
+        {
+            "deconvolution_csv": str(DATA / "deconvolution.csv"),
+            "cv_thr": 0.2,
+            # cohort coded 1/2/3 and listed in reverse order: matched by sample ID, treated as categorical
+            "batch_csv": str(DATA / "deconvolution_batch.csv"),
+            "batch_column": "cohort",
+        },
+    )
+    assert not result.is_error, result.content[0].text
+    sc = result.structured_content
+    assert sc["summary"]["names"] == [
+        "Deconvolution matrix",
+        "Deconvolution subgroups per cell types",
+        "Deconvolution subgroups composition",
+        "Discarded features with high number of zeros",
+        "Discarded features with low variance",
+        "Discarded cell types",
+    ]
+    assert set(sc["summary"]["names"]) == set(sc["field_glossary"])
+    with open(Path(sc["run_dir"]) / sc["csv_outputs"]["Deconvolution matrix"], newline="") as fh:
+        columns = next(csv.reader(fh))[1:]
+    subgroups = [c for c in columns if "_Subgroup." in c]
+    assert subgroups and not any("Iteration" in c for c in columns)
+    # Per-cell-type feature tables are written too (a plain list of tables)
+    assert any(key.startswith("Deconvolution subgroups per cell types/") for key in sc["csv_outputs"])
+
+
+@pytest.mark.anyio
+async def test_relate_subgroups_to_pathways(client: Client) -> None:
+    analyzed = await client.call_tool("analyze_deconvolution", {"deconvolution_csv": str(DATA / "deconvolution.csv")})
+    assert not analyzed.is_error
+    subgroups_rds = str(Path(analyzed.structured_content["run_dir"]) / "result.rds")
+
+    result = await client.call_tool(
+        "relate_subgroups_to_pathways",
+        {"subgroups_rds": subgroups_rds, "pathways_csv": str(DATA / "pathways_small.csv"), "corr_type": "spearman"},
+    )
+    assert not result.is_error, result.content[0].text
+    sc = result.structured_content
+    # One element per compared cell type, each with correlations + pvalues tables
+    assert sc["summary"]["class"] == "list"
+    keys = sc["csv_outputs"]
+    assert any(k.endswith("/correlations") for k in keys) and any(k.endswith("/pvalues") for k in keys)
+    assert any(f.endswith(".pdf") for f in sc["output_files"])
+
+    # Sample names that don't match the deconvolution are an error, not an empty result
+    mismatched = await client.call_tool(
+        "relate_subgroups_to_pathways",
+        {"subgroups_rds": subgroups_rds, "pathways_csv": str(DATA / "ml_features_test.csv")},
+    )
+    assert mismatched.is_error
+    assert "Fewer than 5 samples in common" in mismatched.content[0].text
+
+
+@pytest.mark.anyio
+async def test_aggregate_cell_groups_then_analyze(client: Client) -> None:
+    groups = {
+        "Myeloid.cells": ["Macrophages.cells", "Macrophages.M0", "Macrophages.M1", "Macrophages.M2", "Monocytes", "Dendritic.cells"],
+        "Lymphocytes": ["B.cells", "CD4.cells", "CD8.cells", "NK.cells"],
+    }
+    aggregated = await client.call_tool(
+        "aggregate_cell_groups", {"deconvolution_csv": str(DATA / "deconvolution.csv"), "cell_groups": groups}
+    )
+    assert not aggregated.is_error, aggregated.content[0].text
+    sc = aggregated.structured_content
+    assert any("cells_extra=['Myeloid.cells', 'Lymphocytes']" in w for w in sc["warnings"])
+    aggregated_csv = Path(sc["run_dir"]) / sc["csv_outputs"]["result"]
+    with open(aggregated_csv, newline="") as fh:
+        columns = next(csv.reader(fh))[1:]
+    with open(DATA / "deconvolution.csv", newline="") as fh:
+        original = next(csv.reader(fh))[1:]
+    added = [c for c in columns if c not in original]
+    assert set(original) <= set(columns)  # original features are kept
+    assert any(c.endswith("_Lymphocytes") for c in added)
+
+    # A new group name survives the harmonization only when listed in cells_extra
+    def lymphocyte_features(result) -> list[str]:
+        out = result.structured_content
+        with open(Path(out["run_dir"]) / out["csv_outputs"]["Deconvolution matrix"], newline="") as fh:
+            return [c for c in next(csv.reader(fh))[1:] if "Lymphocytes" in c]
+
+    kept = await client.call_tool(
+        "analyze_deconvolution", {"deconvolution_csv": str(aggregated_csv), "cells_extra": ["Lymphocytes"]}
+    )
+    assert not kept.is_error, kept.content[0].text
+    assert lymphocyte_features(kept)
+    dropped = await client.call_tool("analyze_deconvolution", {"deconvolution_csv": str(aggregated_csv)})
+    assert not dropped.is_error
+    assert not lymphocyte_features(dropped)
+
+
+@pytest.mark.anyio
+async def test_aggregate_cell_groups_rejects_ambiguous_group_name(client: Client) -> None:
+    result = await client.call_tool(
+        "aggregate_cell_groups",
+        {"deconvolution_csv": str(DATA / "deconvolution.csv"), "cell_groups": {"All_T": ["CD4.cells", "CD8.cells"]}},
+    )
+    assert result.is_error
+    assert "must not contain '_'" in result.content[0].text

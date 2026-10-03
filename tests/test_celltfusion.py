@@ -11,6 +11,7 @@ import pytest
 from mcp import Client
 
 from mcp_tme_servers.celltfusion.server import mcp
+from mcp_tme_servers.multideconv.server import mcp as multideconv_mcp
 
 DATA = Path(__file__).parent / "data"
 
@@ -79,3 +80,78 @@ async def test_unsupported_cancer_type_is_rejected(client: Client) -> None:
     except Exception:
         return
     assert result.is_error
+
+
+@pytest.mark.anyio
+async def test_prepare_celltfusion_folds_per_fold(client: Client) -> None:
+    # One fold: CellTFusion learns the latent factors on 16 training samples and projects the other 8.
+    result = await client.call_tool(
+        "prepare_celltfusion_folds",
+        {
+            "counts_csv": str(DATA / "celltfusion_raw_counts_small.csv"),
+            "deconvolution_csv": str(DATA / "celltfusion_deconv_small.csv"),
+            "target_csv": str(DATA / "celltfusion_coldata_small.csv"),  # samples in reverse order
+            "target_column": "target",
+            "compute_full_dataset": False,
+            "folds": {"Fold1": list(range(1, 17))},
+            "min_targets_size": 5,
+            "min_module_size": 5,
+        },
+    )
+    assert not result.is_error, result.content[0].text
+    sc = result.structured_content
+    assert sc["summary"]["class"] == "list"
+    assert sc["summary"]["names"] in ("Fold1", ["Fold1"])  # jsonlite unboxes a length-1 vector
+    assert any(f.endswith("Results/fold_Fold1.rds") for f in sc["output_files"])
+
+
+@pytest.mark.anyio
+async def test_prepare_celltfusion_folds_validation(client: Client) -> None:
+    base = {
+        "counts_csv": str(DATA / "celltfusion_raw_counts_small.csv"),
+        "deconvolution_csv": str(DATA / "celltfusion_deconv_small.csv"),
+        "target_csv": str(DATA / "celltfusion_coldata_small.csv"),
+    }
+    cases = [
+        ({}, "either target_column"),
+        ({"target_column": "target", "time_column": "time"}, "either target_column"),
+        ({"time_column": "time"}, "both time_column and event_column"),
+        ({"target_column": "target", "compute_full_dataset": False}, "folds is required"),
+        ({"target_column": "target", "batch": True}, "batch=True needs coldata_csv"),
+    ]
+    for extra, message in cases:
+        result = await client.call_tool("prepare_celltfusion_folds", {**base, **extra})
+        assert result.is_error, extra
+        assert message in result.content[0].text, (extra, result.content[0].text)
+
+    for extra in ({}, {"model_rds": "a.rds", "celltfusion_rds": "b.rds"}):
+        result = await client.call_tool(
+            "project_celltfusion_factors", {"deconvolution_test_csv": base["deconvolution_csv"], **extra}
+        )
+        assert result.is_error
+        assert "exactly one of model_rds" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_run_celltfusion_with_precomputed_subgroups(client: Client) -> None:
+    # Subgroups harmonized by multideconv-server (0.2.0 naming) passed as dt_rds: CellTFusion skips
+    # its own deconvolution analysis.
+    async with Client(multideconv_mcp, raise_exceptions=True) as md:
+        analyzed = await md.call_tool(
+            "analyze_deconvolution", {"deconvolution_csv": str(DATA / "celltfusion_deconv_small.csv")}
+        )
+    assert not analyzed.is_error
+    result = await client.call_tool(
+        "run_celltfusion",
+        {
+            "raw_counts_csv": str(DATA / "celltfusion_raw_counts_small.csv"),
+            "dt_rds": str(Path(analyzed.structured_content["run_dir"]) / "result.rds"),
+            "min_targets_size": 5,
+            "min_module_size": 5,
+            "verbose": False,
+        },
+    )
+    assert not result.is_error, result.content[0].text
+    sc = result.structured_content
+    assert "Latent_spaces" in sc["summary"]["names"]
+    assert sc["summary"]["elements"]["TME_states"]["class"] == "NULL"  # no cancer_type -> mapping skipped

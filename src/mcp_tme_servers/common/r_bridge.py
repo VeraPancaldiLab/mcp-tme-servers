@@ -40,23 +40,61 @@ def _abs(path: str) -> str:
     return str(Path(path).expanduser().resolve())
 
 
-def csv_arg(path: str, row_names: int | None = 1, as_matrix: bool = False) -> dict:
-    """A CSV file, read as a data.frame (optionally coerced to a matrix)."""
-    return {"__type__": "csv", "path": _abs(path), "row_names": row_names, "as_matrix": as_matrix}
+def csv_arg(
+    path: str,
+    row_names: int | None = 1,
+    as_matrix: bool = False,
+    transpose: bool = False,
+    align_to: str | None = None,
+    align_to_columns: bool = False,
+    add_columns: dict[str, dict] | None = None,
+) -> dict:
+    """A CSV file, read as a data.frame (optionally coerced to a matrix).
 
-
-def csv_column_arg(path: str, column: str, row_names: int | None = 1, align_to: str | None = None) -> dict:
-    """A single named column of a CSV file, returned as an R vector.
-
-    With align_to (another CSV, e.g. the feature matrix this column annotates), the column
-    is reordered to follow align_to's row names (sample IDs) -- so a coldata/target CSV
-    doesn't have to share the feature CSV's exact rows and order. If some of align_to's row
-    names are missing from this CSV, it falls back to the old positional contract when both
-    have the same number of rows, and errors (naming the missing IDs) otherwise.
+    Applied in this order: `transpose` (e.g. a genes x samples counts CSV read as samples x
+    genes); `align_to`, which reorders the rows to follow another CSV's sample IDs (its row
+    names, or its column names with align_to_columns=True) with the same fallback rules as
+    csv_column_arg; `add_columns`, a {name: csv_column_arg(...)} dict of columns appended to
+    the data frame (build them with align_to=path, align_to_columns=transpose so they follow
+    this CSV's samples); then `as_matrix`.
     """
-    spec = {"__type__": "csv_column", "path": _abs(path), "column": column, "row_names": row_names}
+    spec: dict[str, Any] = {"__type__": "csv", "path": _abs(path), "row_names": row_names, "as_matrix": as_matrix}
+    if transpose:
+        spec["transpose"] = True
     if align_to is not None:
         spec["align_to"] = _abs(align_to)
+        spec["align_to_columns"] = align_to_columns
+    if add_columns:
+        spec["add_columns"] = add_columns
+    return spec
+
+
+def csv_column_arg(
+    path: str,
+    column: str,
+    row_names: int | None = 1,
+    align_to: str | None = None,
+    align_to_columns: bool = False,
+    as_character: bool = False,
+) -> dict:
+    """A single named column of a CSV file, returned as an R vector.
+
+    as_character=True returns it as a character vector whatever its content -- for a
+    grouping column (e.g. a batch coded 1/2/3) that R must treat as categorical, not numeric.
+
+    With align_to (another CSV, e.g. the feature matrix this column annotates), the column
+    is reordered to follow align_to's sample IDs -- its row names, or its column names with
+    align_to_columns=True (e.g. a genes x samples counts CSV) -- so a coldata/target CSV
+    doesn't have to share the feature CSV's exact samples and order. If some of those IDs
+    are missing from this CSV, it falls back to the old positional contract when both have
+    the same number of samples, and errors (naming the missing IDs) otherwise.
+    """
+    spec: dict[str, Any] = {"__type__": "csv_column", "path": _abs(path), "column": column, "row_names": row_names}
+    if as_character:
+        spec["as_character"] = True
+    if align_to is not None:
+        spec["align_to"] = _abs(align_to)
+        spec["align_to_columns"] = align_to_columns
     return spec
 
 
@@ -143,7 +181,9 @@ def named_args_arg(value: dict) -> dict:
     vector (fine when spliced with c(), but wrong for a dict with a vector-valued entry
     like cells_extra, which would stay a nested list instead of becoming a character
     vector), this always resolves to a proper R list() at the top level, normalizing each
-    entry independently.
+    entry independently. An entry may also be another arg spec (e.g. csv_arg(...)), which is
+    resolved into its R object first -- for data-valued arguments such as
+    CellTFusion::prepare_celltfusion_folds' `deconv`.
     """
     return {"__type__": "named_args", "value": value}
 

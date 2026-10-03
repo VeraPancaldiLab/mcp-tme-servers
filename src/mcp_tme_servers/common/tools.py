@@ -112,6 +112,20 @@ SessionIdParam = Annotated[
 ]
 
 
+def _spec_paths(spec: Any) -> list[str]:
+    """Every file path an arg spec reads, including specs nested in named_args values or
+    csv_arg's add_columns -- so the cross-session check also covers those."""
+    if isinstance(spec, list):
+        return [p for item in spec for p in _spec_paths(item)]
+    if not isinstance(spec, dict):
+        return []
+    paths = [spec[key] for key in ("path", "align_to") if isinstance(spec.get(key), str) and "__type__" in spec]
+    for value in spec.values():
+        if isinstance(value, (dict, list)):
+            paths.extend(_spec_paths(value))
+    return paths
+
+
 def resolve_output_dir(
     *,
     runs_root: Path,
@@ -160,8 +174,8 @@ def make_run(*, runs_root: Path) -> Callable:
             try:
                 session = Session.load(session_config, session_id)
                 for arg_name, spec in args.items():
-                    if isinstance(spec, dict) and spec.get("path"):
-                        session.check_not_foreign(arg_name, spec["path"])
+                    for path in _spec_paths(spec):
+                        session.check_not_foreign(arg_name, path)
             except SessionError as e:
                 raise ToolError(str(e)) from e
             if output_dir is None:

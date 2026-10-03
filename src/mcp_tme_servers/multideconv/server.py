@@ -1,6 +1,6 @@
 """multideconv-server: MCP tools for bulk RNAseq cell-type deconvolution
 
-Wraps five entry points from the multideconv R package: running multiple first- and second-generation deconvolution methods on bulk RNAseq, harmonizing their output across methods/signatures into cross-method-agreed cell subgroups, benchmarking against ground-truth proportions, relating subgroups to pathway activity, and replicating learned subgroups onto a new cohort.
+Wraps the multideconv R package's entry points: running multiple first- and second-generation deconvolution methods on bulk RNAseq, summing cell types into coarser user-defined groups, harmonizing their output across methods/signatures into cross-method-agreed cell subgroups, benchmarking against ground-truth proportions, relating subgroups to pathway activity, and replicating learned subgroups onto a new cohort.
 
 Each tool shells out to system R via the shared common/r_bridge.py dispatcher
 (common/r/run_tool.R). multideconv must already be installed in the system R
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "multideconv-server",
     instructions=(
-        'Tools for bulk RNAseq cell-type deconvolution: estimating the relative abundance of immune/stromal/tumor cell types from bulk transcriptomics, then reconciling disagreement across methods and signatures into a smaller set of cell subgroups. The pipeline order within THIS server is run_deconvolution -> analyze_deconvolution, then optionally benchmark_deconvolution (validate against known cell fractions), relate_subgroups_to_pathways (correlate with pathway activity), or replicate_subgroups (apply the same subgroup definitions to a new cohort). '
+        'Tools for bulk RNAseq cell-type deconvolution: estimating the relative abundance of immune/stromal/tumor cell types from bulk transcriptomics, then reconciling disagreement across methods and signatures into a smaller set of cell subgroups. The pipeline order within THIS server is run_deconvolution -> (optionally aggregate_cell_groups, to add coarser groups such as total myeloid or lymphoid cells) -> analyze_deconvolution, then optionally benchmark_deconvolution (validate against known cell fractions), relate_subgroups_to_pathways (correlate with pathway activity), or replicate_subgroups (apply the same subgroup definitions to a new cohort). '
         "IMPORTANT -- this server answers a specific question (\"what cell types, and how much of each, are in this sample\") and is not a required first step for the other servers in this package. pipeML-server can train on this server's harmonized output as one possible feature table among others; RaCInG-server needs cell-type abundance as a genuine input to build its interaction networks. CellTFusion-server is different: it answers a completely separate question (regulatory/TME-state characterization -- cell composition PLUS transcription-factor activity and co-regulation, not proportions alone) and computes its own deconvolution, TF activity, and pathway activity internally by default, so it does NOT need this server to have been run first. Never assume the user wants both servers run in sequence just because they asked for one of them -- pick the server based on which question was actually asked (composition/proportions -> this server; TME states/cell niches/regulatory activity -> CellTFusion-server). IMPORTANT -- immune infiltration IS a composition/proportions question: \"is this sample/patient immune infiltrated\" is answered from this server's cell-type (sub)group proportions (e.g. total or per-cell-type immune fraction from analyze_deconvolution), not from CellTFusion-server -- do not route plain infiltration questions there. Reserve CellTFusion-server for when the question goes beyond how much immune content is present, into the functional/regulatory state of that content (e.g. immune-active vs -suppressed, inflamed vs excluded, TME niches). That said, if this server's output already exists for the cohort in question (e.g. from analyze_deconvolution), it IS worth passing into CellTFusion-server's run_celltfusion (via deconv_csv/dt_rds) to avoid recomputing that step -- a genuine efficiency option when available, just never a prerequisite to go create first. "
         'IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to multideconv itself: Hurtado, M., Khajavi, L., Essabbar, A., & Pancaldi, V. (2025). multideconv -- Integrative pipeline for cell type deconvolution from bulk RNAseq using first and second generation methods. bioRxiv. https://doi.org/10.1101/2025.04.29.651220 -- plus whichever individual deconvolution methods/signatures were actually used. '
         'IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user.'
@@ -47,7 +47,7 @@ mcp = MCPServer(
 
 SESSION_CONFIG = SessionConfig(
     sessions_root=server_home("multideconv") / "runs" / "sessions",
-    stage_by_tool={'run_deconvolution': 'deconvolution', 'analyze_deconvolution': 'harmonization', 'benchmark_deconvolution': 'benchmarking', 'relate_subgroups_to_pathways': 'pathway_relation', 'replicate_subgroups': 'subgroup_replication', 'prepare_deconvolution_folds': 'fold_preparation'},
+    stage_by_tool={'run_deconvolution': 'deconvolution', 'analyze_deconvolution': 'harmonization', 'benchmark_deconvolution': 'benchmarking', 'relate_subgroups_to_pathways': 'pathway_relation', 'replicate_subgroups': 'subgroup_replication', 'prepare_deconvolution_folds': 'fold_preparation', 'aggregate_cell_groups': 'cell_group_aggregation'},
     export_requires=[frozenset({'deconvolution'}), frozenset({'harmonization'})],
     stage_explanations={'deconvolution': 'no cell-type deconvolution has been run yet (run_deconvolution) -- there is no cell-type abundance data in this session to export.', 'harmonization': "deconvolution results haven't been harmonized across methods/signatures yet (analyze_deconvolution) -- exporting now would give raw, per-method-and-signature columns full of redundant or disagreeing features instead of the reduced, cross-method-agreed cell subgroups that downstream analyses are meant to consume."},
 )
@@ -66,9 +66,13 @@ CellTypeList = Annotated[
     Field(
         description=(
             "Extra, non-standard cell type names to keep instead of discarding. multideconv "
-            "recognizes a fixed vocabulary of cell type names (immune/stromal/tumor lineages); "
-            "any deconvolution column whose cell type isn't in that vocabulary is dropped as "
-            "'Discarded cell types' unless listed here."
+            "recognizes a fixed vocabulary of cell type names (immune/stromal/tumor lineages -- "
+            "B, T/CD4/CD8, NK, monocyte/macrophage, dendritic incl. plasmacytoid, myeloid, "
+            "neutrophil/eosinophil/basophil/mast, plasma, cancer, epithelial, endothelial, "
+            "fibroblast/CAF, pericyte/mural, myocyte); any deconvolution column whose cell type "
+            "isn't in that vocabulary is dropped as 'Discarded cell types' unless listed here. "
+            "This includes groups created with aggregate_cell_groups under a new name (e.g. "
+            "Lymphocytes): list them here or they are discarded."
         )
     ),
 ]
@@ -83,36 +87,30 @@ def _analyze_deconvolution_glossary() -> dict[str, str]:
             "(for example pipeML-server, CellTFusion-server, RaCInG-server)."
         ),
         "Deconvolution subgroups per cell types": (
-            "For each canonical cell type, which method/signature combinations were judged "
-            "to agree closely enough (>= corr) to be treated as estimating the same thing."
+            "For each canonical cell type, its final features: one column per subgroup "
+            "(<CellType>_Subgroup.<i>, the median of its member features) plus the "
+            "method/signature features that didn't group with any other."
         ),
         "Deconvolution subgroups composition": (
-            "The subgroup membership structure itself. This is the object replicate_subgroups "
-            "and relate_subgroups_to_pathways expect as their subgroups/deconv_res input -- "
-            "pass this call's run_dir/result.rds to those tools' *_rds parameter."
-        ),
-        "Discarded groups with equal method": (
-            "Subgroups dropped because every member came from the same deconvolution method "
-            "across different signatures rather than genuine cross-method agreement -- "
-            "agreement between two signatures of the same method isn't evidence the cell type "
-            "estimate itself is robust."
+            "The subgroup membership structure itself: per cell type, which method/signature "
+            "features make up each <CellType>_Subgroup.<i> (every pair of them correlates >= "
+            "corr). This is the object replicate_subgroups and relate_subgroups_to_pathways "
+            "expect as their subgroups/deconv_res input -- pass this call's run_dir/result.rds "
+            "to those tools' *_rds parameter."
         ),
         "Discarded features with high number of zeros": (
             "Features dropped for exceeding zero_thr fraction of samples at zero -- usually a "
             "cell type this cohort's data can't reliably distinguish from absent."
         ),
         "Discarded features with low variance": (
-            "Features dropped for near-constant values across samples (below var_quantile) -- "
-            "uninformative for distinguishing samples from each other."
+            "Features dropped for near-constant values across samples (coefficient of "
+            "variation, sd/mean, below cv_thr) -- uninformative for distinguishing samples from "
+            "each other."
         ),
         "Discarded cell types": (
             "Cell type labels found in the input that aren't part of multideconv's standard "
             "nomenclature and weren't listed in cells_extra -- pass them via cells_extra if "
             "they're real, meaningful cell types you want kept."
-        ),
-        "High correlated deconvolution groups (>0.9) per cell type": (
-            "Which specific feature pairs exceeded prune_thr and were pruned/merged together "
-            "-- useful for auditing exactly what got collapsed."
         ),
     }
 
@@ -136,10 +134,9 @@ def _analyze_deconvolution_diagnostics(summary: dict) -> list[str]:
             warnings.append(
                 f"Only {n_features} cell-type subgroup(s) survived filtering -- unusually few. "
                 "If you expected more cell types, this usually means the deconvolution methods/"
-                "signatures disagreed substantially with each other (try a lower corr to merge "
-                "more aggressively) or too many features were discarded as zero-heavy/"
-                "low-variance for this cohort's sample size (try raising zero_thr or lowering "
-                "var_quantile)."
+                "signatures were discarded as zero-heavy/low-variance for this cohort's sample "
+                "size (try raising zero_thr or lowering cv_thr) -- see the two 'Discarded "
+                "features' elements for what was dropped."
             )
     discarded_types = elements.get("Discarded cell types", {})
     if discarded_types.get("length", 0) > 0:
@@ -250,7 +247,7 @@ async def run_deconvolution(
         Field(
             description=(
                 "Which methods to build a custom signature with, if create_signature=True "
-                "(default: all four). CIBERSORTx additionally requires credentials_mail/"
+                "(default: all four; multideconv also accepts 'CBSX' for CIBERSORTx). CIBERSORTx additionally requires credentials_mail/"
                 "credentials_token to actually run; BSeq-SC additionally requires cell_markers "
                 "and is silently skipped without it. Ignored unless create_signature=True."
             )
@@ -265,8 +262,10 @@ async def run_deconvolution(
                 "call's run_dir). Give it a real, memorable name if you intend to reference this "
                 "signature later via signatures_select in another call -- if left unset, the "
                 "files get a generic name instead, and a later create_signature=True call reusing "
-                "the same output_dir will silently overwrite them rather than creating a "
-                "distinctly-named second signature. Ignored unless create_signature=True."
+                "the same output_dir will overwrite them rather than creating a "
+                "distinctly-named second signature. Any '_' is replaced by '-' ('_' separates "
+                "method, signature and cell type in the output column names). Ignored unless "
+                "create_signature=True."
             )
         ),
     ] = None,
@@ -388,6 +387,85 @@ async def run_deconvolution(
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
+async def aggregate_cell_groups(
+    deconvolution_csv: Annotated[str, Field(description="RAW deconvolution matrix CSV (samples as rows, method_signature_celltype columns) from run_deconvolution's result.csv -- not analyze_deconvolution's harmonized subgroups.")],
+    cell_groups: Annotated[
+        dict[str, list[str]],
+        Field(
+            description=(
+                "Group name -> the cell types to sum into it, written as in multideconv's "
+                "nomenclature, e.g. {\"Myeloid.cells\": [\"Macrophages.cells\", \"Macrophages.M0\", "
+                "\"Macrophages.M1\", \"Macrophages.M2\", \"Monocytes\", \"Dendritic.cells\"], "
+                "\"Lymphocytes\": [\"B.cells\", \"CD4.cells\", \"CD8.cells\", \"NK.cells\"]}. A group "
+                "name can be a cell type of the nomenclature (e.g. Myeloid.cells): method-signature "
+                "combinations that already estimate it are left as they are. Any other group name "
+                "must not contain '_' nor the name of a nomenclature cell type (e.g. "
+                "'Lymphocytes' is fine, 'All_T' or 'T.cells.helper.group' are not). The cell types "
+                "of one group shouldn't overlap -- don't list a cell type together with its own "
+                "subtypes (e.g. Macrophages.cells AND Macrophages.M1) if a signature reports both "
+                "the total and the subtypes, or the total gets counted twice."
+            )
+        ),
+    ],
+    ctx: Context,
+    output_dir: OutputDir = None,
+    session_id: SessionIdParam = None,
+    min_types: Annotated[int, Field(ge=1, description="Minimum number of the group's cell types a method-signature combination must estimate to get the group feature. Combinations with fewer are skipped (with 1, the group would just copy a single cell type).")] = 2,
+) -> RunResult:
+    """Sum cell types into coarser, user-defined groups within each method-signature combination
+    (multideconv::aggregate_cell_groups).
+
+    WHAT: for every method-signature combination, adds a new feature <method>_<signature>_<group>
+    holding the sum of that group's cell types (e.g. Myeloid cells = macrophages + monocytes +
+    dendritic cells). Cell types are only summed within the same method-signature combination
+    (where fractions are on a common scale), and all original features are kept. The R log
+    (log_tail) lists which cell types were summed, kept or skipped per combination.
+
+    WHEN: an optional step right after run_deconvolution, before analyze_deconvolution, when the
+    question is about a broader compartment (total myeloid, total lymphoid, total T cells ...)
+    than the individual cell types the signatures report -- e.g. "how much lymphocyte infiltration"
+    rather than "how many CD8 T cells". The result is a deconvolution matrix like any other: pass
+    its result.csv to analyze_deconvolution, benchmark_deconvolution, prepare_deconvolution_folds
+    or pipeML-server.
+
+    Two things are needed for the groups to survive downstream (see warnings):
+      - cells_extra: group names that aren't in multideconv's nomenclature (e.g. Lymphocytes) must
+        be passed as cells_extra to analyze_deconvolution, benchmark_deconvolution and
+        prepare_deconvolution_folds (or in train_ml_model's fold_construction_args_fixed),
+        otherwise they are discarded as unknown cell types. Listing every group name is safe.
+      - New cohorts: before replicate_subgroups, run this tool with the same cell_groups on the
+        new cohort's deconvolution matrix, otherwise the group features are missing there and
+        become NA.
+
+    Returns the deconvolution matrix with the group features added as new columns (result.csv).
+    """
+    group_names = list(cell_groups)
+
+    def reminders(summary: dict) -> list[str]:
+        return [
+            f"To keep the aggregated groups downstream, pass cells_extra={group_names} to "
+            "analyze_deconvolution, benchmark_deconvolution and prepare_deconvolution_folds (names "
+            "already in multideconv's nomenclature are simply ignored there), and aggregate the same "
+            "cell_groups on any new cohort before replicate_subgroups. Check log_tail for the "
+            "combinations that were skipped (fewer than min_types of a group's cell types)."
+        ]
+
+    args = args_from(
+        **{
+            "deconvolution": csv_arg(deconvolution_csv, row_names=1),
+            "cell_groups": named_args_arg(cell_groups),
+            "min_types": lit(min_types),
+            "verbose": lit(True),
+        }
+    )
+    return await _run(
+        package="multideconv", function="aggregate_cell_groups", args=args, tool_name="aggregate_cell_groups",
+        ctx=ctx, timeout=300, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        diagnostics=reminders,
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
 async def analyze_deconvolution(
     deconvolution_csv: Annotated[str, Field(description="Deconvolution matrix CSV (samples as rows, features as columns) from run_deconvolution's result.csv.")],
     ctx: Context,
@@ -399,7 +477,10 @@ async def analyze_deconvolution(
             ge=0, le=1,
             description=(
                 "Minimum correlation for grouping different methods'/signatures' estimates of "
-                "(presumably) the same cell type into one merged subgroup. Higher (e.g. 0.9) is "
+                "(presumably) the same cell type into one merged subgroup. Grouping is "
+                "complete-linkage: features end up in the same subgroup only if EVERY pair of "
+                "them correlates at least this much (non-significant correlations count as 0), "
+                "so the result doesn't depend on column order. Higher (e.g. 0.9) is "
                 "stricter: only near-identical estimates merge, so you keep more separate "
                 "features, some of which may just be noisy or redundant restatements of each "
                 "other. Lower (e.g. 0.5) merges more aggressively into fewer, more robust "
@@ -413,16 +494,16 @@ async def analyze_deconvolution(
     ] = 0.7,
     corr_type: Annotated[Literal["spearman", "pearson"], Field(description="Correlation type for subgroup clustering. Spearman (rank-based, default) is more robust to the non-normal, right-skewed distributions typical of deconvolution proportions.")] = "spearman",
     zero_thr: Annotated[float, Field(ge=0, le=1, description="Maximum fraction of samples allowed to be zero for a feature before it's discarded as unreliably estimated in this cohort.")] = 0.9,
-    var_quantile: Annotated[float, Field(ge=0, le=1, description="Quantile threshold below which near-constant (uninformative) features are removed.")] = 0.25,
-    prune_thr: Annotated[float, Field(ge=0, le=1, description="Correlation (computed with corr_type, and partial on batch if batch_csv is given) above which features of the same cell type are pruned as redundant duplicates rather than kept separately.")] = 0.9,
-    seed: Annotated[int | None, Field(description="Seed for reproducible tie-breaking when choosing which of several highly correlated features to keep.")] = None,
+    cv_thr: Annotated[float, Field(ge=0, description="Minimum coefficient of variation (standard deviation / mean) across samples; features below it are removed as near-constant (uninformative). Relative to each feature's own mean, so rare cell types aren't removed just for having small values.")] = 0.1,
     batch_csv: Annotated[
         str | None,
         Field(
             description=(
                 "Optional CSV with a batch/cohort covariate column, matched to "
                 "deconvolution_csv's samples by row name (first column). When given (with batch_column), correlations are computed as "
-                "*partial* correlations controlling for batch -- use this for multi-cohort data "
+                "*partial* correlations controlling for batch (one indicator per batch, so 3 or "
+                "more cohorts are handled correctly; the column is always treated as categorical, "
+                "even if coded as numbers) -- use this for multi-cohort data "
                 "so that cohort-driven co-variation isn't mistaken for genuine cross-method "
                 "agreement about a cell type."
             )
@@ -439,11 +520,12 @@ async def analyze_deconvolution(
     WHAT: different deconvolution methods and signatures rarely agree exactly on a cell type's
     abundance. This step (1) discards features that are mostly zero or near-constant across
     samples (unreliable/uninformative for this cohort), then (2) clusters the remaining
-    method/signature estimates of presumably-the-same cell type by pairwise correlation, merging
-    ones that agree (>= corr) into a single subgroup and pruning near-duplicates within a
-    subgroup (> prune_thr). The result is a smaller set of cell-type features you can trust
-    because multiple independent methods converged on them, rather than one method's idiosyncratic
-    estimate.
+    method/signature estimates of presumably-the-same cell type by pairwise correlation
+    (complete-linkage hierarchical clustering: a subgroup forms only when every pair of its
+    members correlates >= corr) and replaces each subgroup by the median of its members, named
+    <CellType>_Subgroup.<i>; features without a partner are kept as they are. The result is a
+    smaller set of cell-type features you can trust because multiple estimates converged on them,
+    rather than one method's idiosyncratic estimate, and it doesn't depend on column order.
 
     WHEN: always run this right after run_deconvolution before using the deconvolution output for
     anything else -- benchmarking, ML features, pathway relation, or feeding into RaCInG/
@@ -459,10 +541,8 @@ async def analyze_deconvolution(
             "corr": lit(corr),
             "corr_type": lit(corr_type),
             "zero_thr": lit(zero_thr),
-            "var_quantile": lit(var_quantile),
-            "prune_thr": lit(prune_thr),
-            "seed": lit(seed) if seed is not None else None,
-            "batch": csv_column_arg(batch_csv, batch_column, align_to=deconvolution_csv) if (batch_csv and batch_column) else None,
+            "cv_thr": lit(cv_thr),
+            "batch": csv_column_arg(batch_csv, batch_column, align_to=deconvolution_csv, as_character=True) if (batch_csv and batch_column) else None,
             "cells_extra": lit(cells_extra) if cells_extra else None,
             "file_name": lit(file_name) if file_name else None,
             "return": lit(True),
@@ -507,8 +587,14 @@ async def benchmark_deconvolution(
     Samples are matched between the two CSVs by row name: samples missing from groundtruth_csv
     are dropped with an R warning (see log_tail), and the call fails if no sample names are shared.
 
-    Returns a correlation matrix; low correlations can mean either genuinely poor deconvolution
-    performance or a silent cell-type name mismatch between the two inputs (see warnings).
+    Returns a correlation matrix (cell types as rows, method-signature combinations as columns)
+    with an "average" row (mean over cell types) that orders the combinations; the heatmap labels
+    show how many cell types each average is based on, and scatter plots report one correlation
+    per cell type. If deconvolution_csv holds harmonized subgroups (analyze_deconvolution's
+    output), columns are Subgroup.1, Subgroup.2, ... (the i-th subgroup of each cell type) and no
+    average is computed, since such a column mixes unrelated features. Low correlations can mean
+    either genuinely poor deconvolution performance or a silent cell-type name mismatch between
+    the two inputs (see warnings).
     """
     args = args_from(
         **{
@@ -539,9 +625,10 @@ async def relate_subgroups_to_pathways(
     output_dir: OutputDir = None,
     session_id: SessionIdParam = None,
     file_name: Annotated[str, Field(description="File name prefix for the output heatmap PDFs.")] = "multideconv-server",
-    height: float = 6,
-    width: float = 12,
+    height: Annotated[float | None, Field(gt=0, description="Heatmap height in inches; chosen from the number of subgroups if unset.")] = None,
+    width: Annotated[float | None, Field(gt=0, description="Heatmap width in inches; chosen from the number of pathways if unset.")] = None,
     pval: Annotated[float, Field(ge=0, le=1, description="P-value above which a correlation is left unstarred on the heatmap.")] = 0.05,
+    corr_type: Annotated[Literal["pearson", "spearman"], Field(description="Correlation between subgroup abundance and pathway activity. Pearson (default) or Spearman (rank-based, more robust to skewed proportions and outliers).")] = "pearson",
 ) -> RunResult:
     """Correlate cell-type subgroups with pathway activity, per cell type
     (multideconv::compute.subgroup.pathways).
@@ -549,23 +636,31 @@ async def relate_subgroups_to_pathways(
     WHAT: for each harmonized cell-type subgroup from analyze_deconvolution, correlates its
     abundance against each pathway's activity score across samples -- e.g. does CD8 T-cell
     abundance track with interferon-gamma pathway activity in this cohort. Saves one heatmap PDF
-    per cell type. It helps to know what each subgroup of a specific cell type corresponds to (e.g
-    CD8 has 3 subgroups: subgroup.iteration.1, subgroup.iteration.2, etc); pathway association tells
-    which subgroup corresponds to which biological behavior.
+    per cell type. It helps to know what each subgroup of a specific cell type corresponds to
+    (e.g. CD8 has 3 subgroups: CD8.cells_Subgroup.1, CD8.cells_Subgroup.2, ...); pathway
+    association tells which subgroup corresponds to which biological behavior. Only cell types
+    with more than one feature are compared.
 
     WHEN: after analyze_deconvolution, once you have (or compute separately, e.g. via
     CellTFusion-server) a pathway activity matrix you want to relate cell composition to.
 
-    Side-effect only: check output_files for the generated heatmap PDF paths under run_dir/Results.
+    pathways_csv's row names must be the sample names used in the deconvolution: the call fails
+    when fewer than 5 samples are shared.
+
+    Returns a list with one element per cell type, each holding `correlations` and `pvalues`
+    (subgroups as rows, pathways as columns) -- written as result_<cell type>_correlations.csv /
+    _pvalues.csv (see csv_outputs) -- plus one heatmap PDF per cell type under run_dir/Results
+    (see output_files).
     """
     args = args_from(
         **{
             "subgroups": rds_arg(subgroups_rds),
             "pathways": csv_arg(pathways_csv, row_names=1),
             "file_name": lit(file_name),
-            "height": lit(height),
-            "width": lit(width),
+            "height": lit(height) if height is not None else None,
+            "width": lit(width) if width is not None else None,
             "pval": lit(pval),
+            "corr_type": lit(corr_type),
         }
     )
     return await _run(
@@ -577,7 +672,7 @@ async def relate_subgroups_to_pathways(
 @mcp.tool(annotations=READ_ANNOTATIONS)
 async def replicate_subgroups(
     deconv_res_rds: Annotated[str, Field(description="result.rds from a prior analyze_deconvolution call, defining the subgroup structure to replicate.")],
-    deconvolution_test_csv: Annotated[str, Field(description="Deconvolution matrix CSV from a new/held-out cohort to project onto the trained subgroup definitions.")],
+    deconvolution_test_csv: Annotated[str, Field(description="Deconvolution matrix CSV from a new/held-out cohort to project onto the trained subgroup definitions. If cell groups were aggregated (aggregate_cell_groups) before the training cohort's analyze_deconvolution, aggregate the same groups on this cohort first -- otherwise those features are missing here and come out as NA.")],
     ctx: Context,
     output_dir: OutputDir = None,
     session_id: SessionIdParam = None,
@@ -596,7 +691,10 @@ async def replicate_subgroups(
     analysis, or validating a model trained on the discovery cohort's harmonized features when 
     using pipeML-server.
 
-    Returns a data.frame with the projected subgroup feature proportions for the new cohort.
+    Returns a data.frame with the same features, in the same order, as the training "Deconvolution
+    matrix": each subgroup is the median of its member features in the new cohort. Subgroups with
+    no member in deconvolution_test_csv, and training features missing from it, are NA (with an R
+    warning in log_tail); subgroups computed from only part of their members are also reported.
     """
     args = args_from(
         **{
@@ -663,9 +761,7 @@ async def prepare_deconvolution_folds(
     corr: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's corr -- minimum correlation for merging method/signature estimates into a subgroup.")] = 0.7,
     corr_type: Annotated[Literal["spearman", "pearson"], Field(description="Same as analyze_deconvolution's corr_type.")] = "spearman",
     zero_thr: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's zero_thr.")] = 0.9,
-    var_quantile: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's var_quantile.")] = 0.25,
-    prune_thr: Annotated[float, Field(ge=0, le=1, description="Same as analyze_deconvolution's prune_thr.")] = 0.9,
-    seed: Annotated[int | None, Field(description="Same as analyze_deconvolution's seed.")] = None,
+    cv_thr: Annotated[float, Field(ge=0, description="Same as analyze_deconvolution's cv_thr.")] = 0.1,
     batch_csv: Annotated[str | None, Field(description="Optional CSV with a batch/cohort covariate column, matched to deconvolution_csv's samples by row name -- same partial-correlation behavior as analyze_deconvolution's batch_csv.")] = None,
     batch_column: Annotated[str | None, Field(description="Column in batch_csv identifying each sample's batch/cohort.")] = None,
 ) -> RunResult:
@@ -704,10 +800,8 @@ async def prepare_deconvolution_folds(
             "corr": lit(corr),
             "corr_type": lit(corr_type),
             "zero_thr": lit(zero_thr),
-            "var_quantile": lit(var_quantile),
-            "prune_thr": lit(prune_thr),
-            "seed": lit(seed) if seed is not None else None,
-            "batch": csv_column_arg(batch_csv, batch_column, align_to=deconvolution_csv) if (batch_csv and batch_column) else None,
+            "cv_thr": lit(cv_thr),
+            "batch": csv_column_arg(batch_csv, batch_column, align_to=deconvolution_csv, as_character=True) if (batch_csv and batch_column) else None,
         }
     )
     return await _run(

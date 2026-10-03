@@ -51,7 +51,12 @@ Each `args` entry is built by one of `r_bridge.py`'s typed constructors
 `lit`, `named_args_arg`), matched by a same-named `"__type__"` case in
 `run_tool.R`'s `resolve_arg()`. Adding a new kind of argument means adding a
 constructor on the Python side and a matching resolver case in R -- both
-files must change together.
+files must change together. Sample alignment lives in the bridge, not in the
+servers: `csv_column_arg`/`csv_arg` take `align_to` (+ `align_to_columns` for a
+genes x samples CSV) to follow another CSV's sample IDs, `csv_arg` can also
+`transpose` and append `add_columns`, and `named_args_arg` values may be nested
+specs (e.g. a `csv_arg` for a data-valued fold-function argument). `_run`'s
+cross-session check walks nested specs too.
 
 ### Server file template
 
@@ -113,14 +118,18 @@ at the end. Search for "Known upstream issue" and "TEMP" across
 fix is expected soon and should be removed once confirmed fixed upstream,
 not treated as permanent.
 
-No upstream bug is currently guarded this way (pipeML's old custom-fold +
-`metric = "Accuracy"` crash went away when pipeML dropped `"Accuracy"`).
+No upstream bug is currently open. (CellTFusion's incompatibility with
+multideconv 0.2.0 -- the removed `seed` argument and `.Iteration.<n>`
+subgroup names -- was fixed in CellTFusion `24f8c69`, which now requires
+`multideconv (>= 0.2.0)`.)
 
-### Upstream API as of the last sync (2026-09-30)
+### Upstream API as of the last sync (2026-10-03)
 
-Synced against pipeML `e727861`, multideconv `c2a9813`, CellTFusion
-`c83375a`, RaCInG `fef8ff0` **plus its uncommitted working-tree edit** of
-`R/RaCInG_input_generation.R` (subgroup-aware expression profiles), and
+Synced against pipeML `e727861` **plus its uncommitted working-tree edits** of
+`R/machine_learning.R`, `R/data.R` and `DESCRIPTION` (input validation,
+`preprocess`, `n_groups`, guarded parallelism), multideconv `628ef5b` (0.2.0 +
+`aggregate_cell_groups`), CellTFusion `24f8c69`, RaCInG `fef8ff0` **plus its uncommitted working-tree
+edit** of `R/RaCInG_input_generation.R` (subgroup-aware expression profiles), and
 BioinfoTools `2b0a0e2` (README-only since the installed `5be0c79`, so not
 reinstalled). The others were reinstalled with `R CMD INSTALL
 /home/marcelo.hurtado/Documents/<repo>` (repos: `pipeML`, `multideconv`,
@@ -136,13 +145,44 @@ depend on:
 - `compute_features.training.ML()`: classification `metric` is only
   `"AUROC"` (default when NULL) or `"AUPRC"`; the server never sends
   `metric` for survival (pipeML warns). `ncores` also parallelizes standard
-  survival CV. With `fold_construction_fun`, `ncores = NULL` still builds a
-  0-node cluster, so the server fills in a core count. Fold functions get
+  survival CV; every parallel path is guarded by `ncores > 1`, so the
+  server passes `ncores` through untouched (with `fold_construction_fun`,
+  classification trains sequentially and survival only uses it for tunable
+  parameter combinations). `preprocess = TRUE` (default) removes
+  near-constant and |r| > 0.9 features -- once before CV, or inside each
+  fold with a fold function; `FALSE` trains on the features as given.
+  `compute_prediction()` gained `n_groups` (Kaplan-Meier risk groups,
+  survival). pipeML now stops up front on a target with NAs or a single
+  class, events not coded 0/1, LODO without `batch_var` or with a cohort
+  smaller than `k_folds`, and when no model can be selected (it used to
+  return NULL). In the custom-fold classification path one algorithm's fit
+  error still aborts the run (e.g. treebag on ~10 training samples -- why
+  `test_custom_folds_train_then_shap` pins `seed`). Fold functions get
   the outcome inside `data` (`target` coded no/yes, or `time`/`event`), so
   survival + `prepare_multideconv_folds` works.
 - `compute_prediction()` returns `Curve_bands` and errors when the target
   length doesn't match the test rows -- hence `csv_column_arg(...,
   align_to=...)`, which matches a coldata column to a feature CSV by row name.
+- multideconv 0.2.0: `compute.deconvolution.analysis(deconvolution, corr,
+  corr_type, zero_thr, cv_thr, batch, cells_extra, file_name, return,
+  verbose)` -- subgroups come from complete-linkage clustering (every pair
+  >= `corr`), are named `<CellType>_Subgroup.<i>` (no `.Iteration.`), and the
+  output has 6 elements (no "Discarded groups with equal method"/"High
+  correlated ..."). `prune_thr`, `seed` and `var_quantile` are gone (also
+  from `prepare_multideconv_folds`); the low-variance filter is `cv_thr`
+  (sd/mean, default 0.1). A character/factor `batch` is categorical (one
+  indicator per batch), a numeric one a linear covariate -- the server sends
+  it with `csv_column_arg(..., as_character=True)`. `compute.subgroup.pathways()`
+  gained `corr_type`, `height`/`width` default to NULL, and it returns
+  per-cell-type `correlations`/`pvalues` (run_tool.R writes tables nested one
+  level in a plain list as `result_<element>_<table>.csv`). `computeCBSX`/
+  `computeDWLS`/`computeMOMF` are internal. Deconvolution caches are keyed
+  by the input data.
+- `multideconv::aggregate_cell_groups(deconvolution, cell_groups, min_types,
+  verbose)` (wrapped as `aggregate_cell_groups`) adds
+  `<method>_<signature>_<group>` sum features to a raw deconvolution matrix;
+  new group names must then go in `cells_extra` downstream, and the same
+  groups must be aggregated on a new cohort before replication.
 - `multideconv::prepare_multideconv_folds()` reads the outcome from
   `data`'s `target` or `time`+`event` columns; `time_var`/`event_var`/
   `trait.positive` were removed (and from `prepare_deconvolution_folds`).
@@ -154,6 +194,20 @@ depend on:
   `input/ARACNE/<cancer_type>/network/network.txt` relative to the run dir,
   so `run_celltfusion` copies `aracne_network_file` there via
   `common/tools.py:resolve_output_dir` (also used by `run_deconvolution`).
+- `CellTFusion::prepare_celltfusion_folds(data, folds, bestune, deconv,
+  raw.counts, coldata, batch, batch_id, ncores, return, verbose, ...)` is the
+  second pipeML fold function (`train_ml_model`'s `_FOLD_FUNCTION_PACKAGES`
+  maps each registered name to its package). It needs `deconv` (and
+  `raw.counts`/`coldata`) as data, which `train_ml_model` injects into
+  `fold_construction_args_fixed` from `fold_deconv_csv`/`features_train_csv`/
+  `fold_coldata_csv`; `features_as_rows=True` takes the usual genes x samples
+  counts CSV. No tunable args, no `dt`/`tfs`/`pathways`, no ARACNE (all
+  rejected up front). CellTFusion-server exposes it standalone
+  (`prepare_celltfusion_folds`, outcome appended via `add_columns`) and
+  `project_test_factors` as `project_celltfusion_factors` (from a
+  train_ml_model result's `Custom_output`, or a run_celltfusion result) --
+  the projection a test cohort needs before `predict_ml_model`. Each fold is a
+  full CellTFusion run, hence the 8 h timeout for custom-fold training.
 - RaCInG exports `computeLRContributions`/`computeWedgeLRContributions`/
   `computeTriangleLRContributions` (wrapped as `explain_lr_contributions`,
   fed from `prepare_racing_inputs`' result.rds). `compute_racing_kernel`/
