@@ -121,11 +121,12 @@ def rds_arg(path: str) -> dict:
     return {"__type__": "rds", "path": _abs(path)}
 
 
-def rds_element_arg(path: str, element: str) -> dict:
+def rds_element_arg(path: str, element: str | list[str]) -> dict:
     """One named element of a .rds file's top-level list, e.g. readRDS(path)[["Model"]] --
     for a downstream R function (like pipeML's compute_prediction/compute_shap_values) that
     expects the inner trained-model object itself, not the wrapping result list a tool's own
-    result.rds holds (Model, ML_Models, AUROC_median, ...).
+    result.rds holds (Model, ML_Models, AUROC_median, ...). A list of names walks down nested
+    lists, e.g. ["Custom_output", "Cell_groups"] is readRDS(path)[["Custom_output"]][["Cell_groups"]].
     """
     return {"__type__": "rds_element", "path": _abs(path), "element": element}
 

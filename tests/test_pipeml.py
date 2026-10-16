@@ -275,7 +275,7 @@ CELLTFUSION_FOLD_ARGS = {
     "ncores": 2,
     "fold_construction_fun": "prepare_celltfusion_folds",
     "fold_deconv_csv": str(DATA / "celltfusion_deconv_small.csv"),
-    "fold_construction_args_fixed": {"min_targets_size": 5, "minMod": 5},
+    "fold_construction_args_fixed": {"min_targets_size": 5, "min_module_size": 5, "verbose": False},
 }
 
 
@@ -286,7 +286,9 @@ async def test_celltfusion_fold_validation(client: Client) -> None:
         ({"fold_construction_args_tunable": {"corr": [0.6, 0.8]}}, "doesn't support fold_construction_args_tunable"),
         ({"fold_construction_args_fixed": {"dt": "x"}}, "must be computed within each fold"),
         ({"fold_construction_args_fixed": {"deconv": "x"}}, "pass it via fold_deconv_csv"),
-        ({"fold_construction_args_fixed": {"batch": True, "batch_id": "cohort"}}, "needs fold_coldata_csv"),
+        ({"fold_construction_args_fixed": {"batch": True}}, "fold_coldata_csv + fold_batch_column"),
+        ({"fold_construction_args_fixed": {"minMod": 5}}, "renamed it min_module_size"),
+        ({"fold_batch_column": "cohort"}, "needs both fold_coldata_csv and fold_batch_column"),
         ({"fold_construction_args_fixed": {"TF.collection": "ARACNE"}}, "ARACNE"),
         ({"fold_construction_fun": "prepare_multideconv_folds"}, "only used with fold_construction_fun='prepare_celltfusion_folds'"),
     ]
@@ -298,24 +300,24 @@ async def test_celltfusion_fold_validation(client: Client) -> None:
 
 @pytest.mark.anyio
 async def test_celltfusion_custom_folds_train_project_predict_shap(client: Client) -> None:
-    # Leakage-free CellTFusion features end to end: CellTFusion reruns per fold inside pipeML, the
-    # test cohort is projected onto the final model's latent factors, then scored and explained.
+    # Leakage-free CellTFusion features end to end: CellTFusion reruns per fold inside pipeML and the
+    # model is trained on cell group scores; the test cohort is scored on the final model's cell
+    # groups, then predicted and explained.
     training = await client.call_tool("train_ml_model", CELLTFUSION_FOLD_ARGS)
     assert not training.is_error, training.content[0].text
     sc = training.structured_content
     assert "Custom_output" in sc["summary"]["names"]
-    assert "project_celltfusion_factors" in sc["field_glossary"]["Custom_output"]
+    assert "score_celltfusion_test_set" in sc["field_glossary"]["Custom_output"]
     model_rds = str(Path(sc["run_dir"]) / "result.rds")
 
     async with Client(celltfusion_mcp, raise_exceptions=True) as ctf:
-        projected = await ctf.call_tool(
-            "project_celltfusion_factors",
+        scored = await ctf.call_tool(
+            "score_celltfusion_test_set",
             {"model_rds": model_rds, "deconvolution_test_csv": str(DATA / "celltfusion_deconv_small.csv")},
         )
-    assert not projected.is_error, projected.content[0].text
-    psc = projected.structured_content
+    assert not scored.is_error, scored.content[0].text
+    psc = scored.structured_content
     assert psc["summary"]["dim"][0] == 24
-    assert all(c.startswith("Factor") for c in psc["summary"]["colnames"])
 
     predicted = await client.call_tool(
         "predict_ml_model",

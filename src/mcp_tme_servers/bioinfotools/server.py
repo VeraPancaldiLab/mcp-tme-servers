@@ -59,6 +59,7 @@ from mcp_tme_servers.common.r_bridge import (
 )
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    EXPRESSION_SCALE_INSTRUCTIONS,
     READ_ANNOTATIONS,
     OutputDir,
     RunResult,
@@ -111,7 +112,9 @@ mcp = MCPServer(
         "scores_*_test tools) or to survival with compute_survival_analysis. Score matrices from "
         "this server, or from multideconv-server/CellTFusion-server/RaCInG-server in this same "
         "package, are typical inputs to the trait-association and survival tools here. "
-        "IMPORTANT -- citation: if the user asks what to cite for an analysis that used this "
+        + EXPRESSION_SCALE_INSTRUCTIONS
+        + 'On this server: compute_normalization turns raw counts into TPM or log2(TPM + 1); compute_tf_activity and compute_pathway_activity take log2(TPM + 1); run_deg_analysis and compute_batch_correction take raw counts. If the user only has linear TPM, compute log2(TPM + 1) from it for TF and pathway activity; if they only have log2(TPM + 1), use it as is here and convert it back to TPM for any deconvolution on the other servers. '
+        + "IMPORTANT -- citation: if the user asks what to cite for an analysis that used this "
         "server, always include the mcp-tme-servers project itself -- XX, et al. (XX). "
         "mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference "
         "exists; check the project README for the current one) -- in addition to whichever "
@@ -801,14 +804,18 @@ async def compute_survival_analysis(
             description=(
                 "Samples x features numeric matrix CSV (e.g. TF activity from compute_tf_activity, "
                 "pathway activity from compute_pathway_activity, or a deconvolution matrix from "
-                "multideconv-server), row names matching survival_data_csv. Each feature is "
-                "quantile-split into High/Low groups and tested individually; only features with "
-                "a significant log-rank test are returned. Mutually exclusive with group_column "
+                "multideconv-server), sample IDs as row names -- matched to survival_data_csv's "
+                "samples by ID (it may list them in another order). Each feature is quantile-split "
+                "into High/Low groups and tested individually. Mutually exclusive with group_column "
                 "-- exactly one is required."
             )
         ),
     ] = None,
-    p_value: Annotated[float, Field(ge=0, le=1, description="Log-rank test p-value threshold for keeping a feature as significant, when features_csv is used.")] = 0.05,
+    p_value: Annotated[float, Field(ge=0, le=1, description="Log-rank threshold for keeping a feature as significant, when features_csv is used: (adjusted, see p_adjust) p-value <= p_value.")] = 0.05,
+    p_adjust: Annotated[
+        Literal["none", "BH", "bonferroni", "holm", "hochberg", "hommel", "BY", "fdr"],
+        Field(description="Multiple-testing correction of the log-rank p-values across the features of features_csv (stats::p.adjust; 'BH' = Benjamini-Hochberg FDR). Default 'none' -- screening many features without a correction will find some 'prognostic' ones by chance, so prefer 'BH' for a screen."),
+    ] = "none",
     thres: Annotated[float, Field(ge=0, le=1, description="Quantile cutoff used to split each feature into High/Low groups, when features_csv is used. 0.5 (default) is a median split.")] = 0.5,
     file_name: Annotated[str | None, Field(description="File name suffix used when saving Kaplan-Meier plots to run_dir/Results (as SVG, one per significant group/feature).")] = None,
 ) -> RunResult:
@@ -826,9 +833,12 @@ async def compute_survival_analysis(
     advance.
 
     Returns (group_column case) a list with the KM plot, median PFS per group, log-rank p-value,
-    and median follow-up (see field_glossary); or (features_csv case) a named list of significant
-    Surv() ~ feature formulas, one per significant feature -- NULL if none are significant (see
-    warnings). A Kaplan-Meier plot (with risk table) is saved as an SVG per significant result.
+    and median follow-up (see field_glossary); or (features_csv case) a named list with one
+    Surv() ~ feature formula per significant feature plus a last element `Statistics` -- the test
+    of EVERY feature (cutoff, group sizes, p-value, adjusted p-value, significant), written as
+    result_Statistics.csv; only `Statistics` when nothing is significant (see warnings). Samples
+    with no value in group_column are left out. A Kaplan-Meier plot (with risk table) is saved as
+    an SVG: always for group_column, one per significant feature for features_csv.
     """
     args = args_from(
         **{
@@ -836,9 +846,10 @@ async def compute_survival_analysis(
             "PFS": lit(pfs_column),
             "PFS_event": lit(pfs_event_column),
             "file_name": lit(file_name) if file_name else None,
-            "features": csv_arg(features_csv, row_names=1) if (features_csv and not group_column) else None,
+            "features": csv_arg(features_csv, row_names=1, align_to=survival_data_csv) if (features_csv and not group_column) else None,
             "p.value": lit(p_value),
             "thres": lit(thres),
+            "p_adjust": lit(p_adjust),
             "group_column": lit(group_column) if group_column else None,
         }
     )
@@ -850,17 +861,19 @@ async def compute_survival_analysis(
             "median_PFS": "Median survival time per group (group_column case).",
             "p_value": "Log-rank test p-value across groups (group_column case).",
             "median_follow_up": "Median follow-up time via reverse Kaplan-Meier (group_column case).",
+            "Statistics": "Log-rank test of every feature (features_csv case): feature, cutoff, n_high, n_low, p_value, p_adjusted and significant -- also the non-significant ones, so effect direction and near-misses can be inspected.",
         },
         diagnostics=_survival_diagnostics,
     )
 
 
 def _survival_diagnostics(summary: dict) -> list[str]:
-    if summary.get("class") == "NULL":
+    names = summary.get("names")
+    if names in ("Statistics", ["Statistics"]):  # jsonlite unboxes a length-1 vector
         return [
-            "No feature reached the log-rank p-value threshold -- the call succeeded but nothing "
-            "was prognostic at this cutoff. Try a higher p_value, a different thres split, or "
-            "confirm survival_data_csv and features_csv share the same sample identifiers."
+            "No feature reached the log-rank threshold -- the call succeeded but nothing was "
+            "prognostic at this cutoff (see result_Statistics.csv for every feature's p-value). Try "
+            "a different thres split, or a less strict p_value/p_adjust."
         ]
     return []
 

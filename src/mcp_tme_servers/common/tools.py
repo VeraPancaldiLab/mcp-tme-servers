@@ -26,6 +26,26 @@ _SESSION_ANNOTATIONS = ToolAnnotations(read_only_hint=False, open_world_hint=Fal
 
 _SECRET_KEY_MARKERS = ("token", "password", "secret", "credential")
 
+# One rule for every server that takes an expression matrix, so the model is told the same thing
+# everywhere: verify the scale first, deconvolution on linear TPM, everything else on log2(TPM + 1).
+EXPRESSION_SCALE_INSTRUCTIONS = (
+    "IMPORTANT -- expression scale: verify what an expression matrix holds BEFORE running any tool on it, "
+    "every time, even when the file name seems to say it. Look at the values: raw counts (non-negative "
+    "integers, sample totals of millions that differ between samples), linear TPM (non-negative, not "
+    "integers, large values, each sample summing to about 1e6 when all genes are present), log-transformed "
+    "values such as log2(TPM + 1) (small range, usually no value above ~20), or another normalization "
+    "(CPM, FPKM/RPKM, VST, z-scores -- negative values mean centred or z-scored data). If you cannot tell "
+    "with confidence, ask the user to confirm the scale instead of guessing. Then follow these rules: "
+    "(1) cell-type deconvolution is ALWAYS run on linear TPM (or on raw counts that the tool itself "
+    "normalizes to TPM) and never on log-transformed values -- a log2(TPM + 1) matrix must be converted "
+    "back first (2^x - 1); "
+    "(2) every other expression-based feature -- transcription-factor activity, pathway activity, "
+    "GSEA/enrichment scores, PCA of expression -- uses log2(TPM + 1); "
+    "(3) if linear TPM cannot be obtained (only z-scores, VST or another normalization that cannot be "
+    "converted back), do not run deconvolution silently: tell the user that it will be run on that other "
+    "type of normalization instead of TPM. Tell the user which scale each step received. "
+)
+
 
 def _redact_secrets(args: dict[str, dict]) -> dict[str, dict]:
     """Copy of `args` with any credential-looking literal value masked out.

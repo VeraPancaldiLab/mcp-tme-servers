@@ -153,7 +153,13 @@ resolve_arg <- function(spec) {
   }
 
   if (type == "rds_element") {
-    return(readRDS(spec$path)[[spec$element]])
+    # One name, or a path of names into nested lists
+    x <- readRDS(spec$path)
+    for (el in unlist(spec$element)) {
+      if (is.null(x[[el]])) stop("Element '", el, "' is missing or NULL in ", basename(spec$path))
+      x <- x[[el]]
+    }
+    return(x)
   }
 
   if (type == "rds_element_rownames") {

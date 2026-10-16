@@ -23,6 +23,7 @@ from mcp_tme_servers.common.paths import server_home
 from mcp_tme_servers.common.r_bridge import args_from, csv_arg, csv_column_arg, lit, named_args_arg, rds_arg
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    EXPRESSION_SCALE_INSTRUCTIONS,
     READ_ANNOTATIONS,
     OutputDir,
     RunResult,
@@ -39,7 +40,9 @@ mcp = MCPServer(
     instructions=(
         'Tools for bulk RNAseq cell-type deconvolution: estimating the relative abundance of immune/stromal/tumor cell types from bulk transcriptomics, then reconciling disagreement across methods and signatures into a smaller set of cell subgroups. The pipeline order within THIS server is run_deconvolution -> (optionally aggregate_cell_groups, to add coarser groups such as total myeloid or lymphoid cells) -> analyze_deconvolution, then optionally benchmark_deconvolution (validate against known cell fractions), relate_subgroups_to_pathways (correlate with pathway activity), or replicate_subgroups (apply the same subgroup definitions to a new cohort). '
         "IMPORTANT -- this server answers a specific question (\"what cell types, and how much of each, are in this sample\") and is not a required first step for the other servers in this package. pipeML-server can train on this server's harmonized output as one possible feature table among others; RaCInG-server needs cell-type abundance as a genuine input to build its interaction networks. CellTFusion-server is different: it answers a completely separate question (regulatory/TME-state characterization -- cell composition PLUS transcription-factor activity and co-regulation, not proportions alone) and computes its own deconvolution, TF activity, and pathway activity internally by default, so it does NOT need this server to have been run first. Never assume the user wants both servers run in sequence just because they asked for one of them -- pick the server based on which question was actually asked (composition/proportions -> this server; TME states/cell niches/regulatory activity -> CellTFusion-server). IMPORTANT -- immune infiltration IS a composition/proportions question: \"is this sample/patient immune infiltrated\" is answered from this server's cell-type (sub)group proportions (e.g. total or per-cell-type immune fraction from analyze_deconvolution), not from CellTFusion-server -- do not route plain infiltration questions there. Reserve CellTFusion-server for when the question goes beyond how much immune content is present, into the functional/regulatory state of that content (e.g. immune-active vs -suppressed, inflamed vs excluded, TME niches). That said, if this server's output already exists for the cohort in question (e.g. from analyze_deconvolution), it IS worth passing into CellTFusion-server's run_celltfusion (via deconv_csv/dt_rds) to avoid recomputing that step -- a genuine efficiency option when available, just never a prerequisite to go create first. "
-        'IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to multideconv itself: Hurtado, M., Khajavi, L., Essabbar, A., & Pancaldi, V. (2025). multideconv -- Integrative pipeline for cell type deconvolution from bulk RNAseq using first and second generation methods. bioRxiv. https://doi.org/10.1101/2025.04.29.651220 -- plus whichever individual deconvolution methods/signatures were actually used. '
+        + EXPRESSION_SCALE_INSTRUCTIONS
+        + 'On this server: run_deconvolution takes raw counts (normalized=True, the default) or linear TPM (normalized=False); it has no option for log-transformed input. '
+        + 'IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to multideconv itself: Hurtado, M., Khajavi, L., Essabbar, A., & Pancaldi, V. (2025). multideconv -- Integrative pipeline for cell type deconvolution from bulk RNAseq using first and second generation methods. bioRxiv. https://doi.org/10.1101/2025.04.29.651220 -- plus whichever individual deconvolution methods/signatures were actually used. '
         'IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user.'
         'IMPORTANT -- visualizing cell-type proportions: when showing cell-type composition/proportions from this server\'s output (e.g. analyze_deconvolution\'s harmonized subgroups), always plot every subgroup per cell type as its own bar -- never average or collapse subgroups within a cell type into a single value/bar. A cell type\'s subgroups (different method/signature combinations judged to agree) can still legitimately differ in their exact proportion estimates, and averaging them away hides that heterogeneity, which is itself informative (e.g. about how much the surviving methods/signatures actually agree on the number, not just the direction). Bar plots are the right chart for this -- one bar per subgroup, grouped/faceted by cell type (and by sample/patient when comparing across samples) -- so the spread across subgroups stays visible rather than being flattened into a single summary bar.'
     ),
@@ -180,9 +183,11 @@ async def run_deconvolution(
         str,
         Field(
             description=(
-                "CSV of raw RNAseq counts: genes as rows (first column = gene symbol), samples "
-                "as columns. Raw (un-normalized) integer-like counts are expected by default; "
-                "set normalized=False if you're instead passing already-normalized expression."
+                "CSV of RNAseq expression: genes as rows (first column = gene symbol), samples "
+                "as columns. Either raw (un-normalized, integer-like) counts, which is the default "
+                "(normalized=True: TPM normalization is applied internally), or LINEAR TPM with "
+                "normalized=False. Never log-transformed values: convert log2(TPM + 1) back to "
+                "TPM (2^x - 1) first. Verify the scale before calling."
             )
         ),
     ],
@@ -219,7 +224,7 @@ async def run_deconvolution(
         list[str] | None,
         Field(description="Signature matrix names to run (e.g. tissue- or platform-specific references); all bundled signatures are used if omitted."),
     ] = None,
-    normalized: Annotated[bool, Field(description="Set False only if raw_counts_csv already holds normalized (not raw count) expression values.")] = True,
+    normalized: Annotated[bool, Field(description="True (default): raw_counts_csv holds raw counts and is normalized to TPM internally. Set False only if raw_counts_csv already holds LINEAR TPM (it is then used as is). False does not mean 'any normalized values': log-transformed values are not accepted.")] = True,
     do_parallel: Annotated[bool, Field(description="Parallelize CBSX/DWLS across signatures (faster with many signatures, more memory).")] = False,
     workers: Annotated[int | None, Field(description="Worker processes if do_parallel=True; default is detectCores()-1.")] = None,
     create_signature: Annotated[bool, Field(description="Build custom signature matrices from the provided single-cell reference (requires the sc_* arguments) instead of using bundled signatures.")] = False,

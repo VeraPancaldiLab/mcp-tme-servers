@@ -83,9 +83,11 @@ _TRAINING_GLOSSARY = {
         "prepare_multideconv_folds it is structurally the same object analyze_deconvolution's "
         "result.rds is -- project with multideconv-server's replicate_subgroups (deconv_res_rds). "
         "For prepare_celltfusion_folds it is a full run_celltfusion-style result (cell groups, "
-        "NMF latent factors, TME states) learned on all training samples -- project with "
-        "CellTFusion-server's project_celltfusion_factors, passing this call's run_dir/result.rds "
-        "as its model_rds. Feeding predict_ml_model a test set that wasn't projected this way (e.g. "
+        "NMF latent factors, cell niches) learned on all training samples -- the model's features "
+        "are its cell group scores, so score a test cohort with CellTFusion-server's "
+        "score_celltfusion_test_set, passing this call's run_dir/result.rds as its model_rds "
+        "(project_celltfusion_factors can then place it on the latent factors, for "
+        "characterization only). Feeding predict_ml_model a test set that wasn't projected this way (e.g. "
         "a raw deconvolution or counts matrix instead) will silently score against the wrong "
         "feature space. The selected feature-construction parameters (when "
         "fold_construction_args_tunable was used) are in its $Parameters."
@@ -98,14 +100,24 @@ _FOLD_FUNCTION_PACKAGES = {
     "prepare_celltfusion_folds": "CellTFusion",
 }
 
-# Arguments prepare_celltfusion_folds gets from this tool's own parameters, or can't take at all
+# Arguments prepare_celltfusion_folds gets from this tool's own parameters, can't take at all, or
+# that CellTFusion renamed/removed (a hint instead of an "unused argument" error after a long run)
 _CELLTFUSION_FOLD_RESERVED = {
-    "deconv": "fold_deconv_csv",
-    "raw.counts": "features_train_csv (it is passed on automatically)",
-    "coldata": "fold_coldata_csv",
-    "dt": None,
-    "tfs": None,
-    "pathways": None,
+    "deconv": "pass it via fold_deconv_csv",
+    "raw_counts": "it comes from features_train_csv automatically",
+    "raw.counts": "it comes from features_train_csv automatically",
+    "batch": "pass the cohort column via fold_coldata_csv + fold_batch_column",
+    "batch_id": "pass the cohort column via fold_coldata_csv + fold_batch_column",
+    "coldata": "pass the cohort column via fold_coldata_csv + fold_batch_column",
+    "dt": "it must be computed within each fold",
+    "tfs": "it must be computed within each fold",
+    "pathways": "it must be computed within each fold",
+    "minMod": "CellTFusion renamed it min_module_size",
+    "ncores": "CellTFusion replaced it with do_parallel/workers",
+    "cbsx.mail": "CellTFusion renamed it cbsx_mail",
+    "cbsx.token": "CellTFusion renamed it cbsx_token",
+    "enrich_thresh": "CellTFusion removed it (cell niches now use top_n)",
+    "quantile_cutoff": "CellTFusion removed it (cell niches now use top_n)",
 }
 
 _PREDICTION_GLOSSARY = {
@@ -242,9 +254,10 @@ async def train_ml_model(
                 "harmonizes deconvolution cell-type subgroups per fold; 'prepare_celltfusion_folds' "
                 "(CellTFusion::prepare_celltfusion_folds, exposed standalone as CellTFusion-server's "
                 "prepare_celltfusion_folds for inspection) runs the whole CellTFusion pipeline per "
-                "fold -- TF activity, TF modules, cell groups and NMF latent factors are learned on "
-                "the fold's training samples only, and the held-out samples are projected onto those "
-                "factors; the model is trained on the latent factors. It needs raw counts as "
+                "fold -- TF activity, TF modules and cell groups are learned on the fold's training "
+                "samples only, and the held-out samples are scored on those cell groups; the model is "
+                "trained on the cell group scores (the NMF latent factors are only computed on all "
+                "samples, to characterize the final model). It needs raw counts as "
                 "features_train_csv (features_as_rows=True for a genes x samples CSV) plus "
                 "fold_deconv_csv, and is much heavier (one full CellTFusion run per fold, plus one "
                 "on all samples). Only these two are available "
@@ -255,7 +268,7 @@ async def train_ml_model(
                 "can't be wired in through this MCP tool today, only by calling pipeML directly in "
                 "R. IMPORTANT: setting this means the feature space is rebuilt inside every fold "
                 "from features_train_csv itself -- the cell-type subgroups "
-                "(prepare_multideconv_folds) or CellTFusion latent factors "
+                "(prepare_multideconv_folds) or CellTFusion cell groups "
                 "(prepare_celltfusion_folds) actually used to train this model are NOT the same as "
                 "any prior, separate analyze_deconvolution/run_celltfusion call may have produced, "
                 "even on the same input data (that prior run saw the full cohort, including what "
@@ -280,14 +293,15 @@ async def train_ml_model(
                 "\"cv_thr\": 0.1, \"cells_extra\": [\"TypeA\"]} -- see "
                 "multideconv-server's analyze_deconvolution tool for what each one means. For "
                 "'prepare_celltfusion_folds', these are CellTFusion() arguments under their R names "
-                "(e.g. {\"normalized\": true, \"TF.collection\": \"CollecTRI\", "
-                "\"min_targets_size\": 5, \"minMod\": 5, \"corr_mod\": 0.9, \"corr\": 0.7, "
-                "\"pval\": 0.05, \"cancer_type\": \"skcm\"} -- see CellTFusion-server's run_celltfusion "
-                "for what each one means), plus \"ncores\" (folds computed in parallel, default 1), "
-                "\"batch\"/\"batch_id\" (multi-cohort mode, needs fold_coldata_csv) and "
-                "\"verbose\". deconv, raw.counts and coldata come from this tool's own parameters; "
-                "dt, tfs and pathways can't be given (they must be computed per fold); "
-                "TF.collection='ARACNE' isn't supported here."
+                "(e.g. {\"normalized\": true, \"TF.collection\": \"CollecTRI\", \"method\": "
+                "\"ulm\", \"min_targets_size\": 5, \"min_module_size\": 5, \"corr_mod\": 0.9, "
+                "\"corr\": 0.7, \"pval\": 0.05, \"padj\": false, \"min_cluster_size\": 3, \"seed\": "
+                "123} -- see CellTFusion-server's run_celltfusion for what each one means), plus "
+                "\"do_parallel\"/\"workers\" (folds computed in parallel) and \"verbose\". deconv, "
+                "raw_counts and batch come from this tool's own parameters (fold_deconv_csv, "
+                "features_train_csv, fold_coldata_csv + fold_batch_column); dt, tfs and pathways "
+                "can't be given (they must be computed per fold); TF.collection='ARACNE' isn't "
+                "supported here."
             )
         ),
     ] = None,
@@ -323,9 +337,20 @@ async def train_ml_model(
         Field(
             description=(
                 "fold_construction_fun='prepare_celltfusion_folds' only: sample metadata CSV "
-                "(samples as rows), required when fold_construction_args_fixed sets \"batch\": true "
-                "(multi-cohort mode), to read its \"batch_id\" column. Matched to the training "
-                "samples by sample ID."
+                "(samples as rows) holding fold_batch_column. Matched to the training samples by "
+                "sample ID."
+            )
+        ),
+    ] = None,
+    fold_batch_column: Annotated[
+        str | None,
+        Field(
+            description=(
+                "fold_construction_fun='prepare_celltfusion_folds' only: column of fold_coldata_csv "
+                "with each sample's cohort -- runs CellTFusion's multi-cohort mode in every fold "
+                "(treated as categorical). Held-out samples of each cohort are then z-scored on "
+                "their own means and SDs, which is unreliable with fewer than ~10 test samples per "
+                "cohort and fold (leave-one-dataset-out folds avoid it, see lodo)."
             )
         ),
     ] = None,
@@ -348,7 +373,7 @@ async def train_ml_model(
     fold function computes features from (a raw deconvolution matrix for
     prepare_multideconv_folds, raw gene counts plus fold_deconv_csv for prepare_celltfusion_folds
     -- see that parameter's own description), and the features actually used to train the model
-    (cell-type subgroups, or CellTFusion latent factors) are recomputed fresh inside each fold, NOT
+    (cell-type subgroups, or CellTFusion cell group scores) are recomputed fresh inside each fold, NOT
     the same ones any separate, prior analyze_deconvolution/run_celltfusion call may have produced
     -- do not assume they match. The feature space that ends up backing the final model is
     returned in this call's own result under Custom_output if you want to inspect it afterward,
@@ -364,32 +389,31 @@ async def train_ml_model(
 
     This can be a slow call with many folds/repetitions or a fold_construction_fun (which reruns
     feature construction per fold -- for prepare_celltfusion_folds, a full CellTFusion run per
-    fold, so keep k_folds x n_rep modest and consider its "ncores"); progress is reported
+    fold, so keep k_folds x n_rep modest and consider its "do_parallel"); progress is reported
     periodically.
     """
     celltfusion_folds = fold_construction_fun == "prepare_celltfusion_folds"
-    if (fold_deconv_csv or fold_coldata_csv) and not celltfusion_folds:
-        raise ToolError("fold_deconv_csv/fold_coldata_csv are only used with fold_construction_fun='prepare_celltfusion_folds'.")
+    if (fold_deconv_csv or fold_coldata_csv or fold_batch_column) and not celltfusion_folds:
+        raise ToolError("fold_deconv_csv/fold_coldata_csv/fold_batch_column are only used with fold_construction_fun='prepare_celltfusion_folds'.")
     fixed_args: dict = dict(fold_construction_args_fixed or {})
     if celltfusion_folds:
         if not fold_deconv_csv:
             raise ToolError("fold_construction_fun='prepare_celltfusion_folds' needs fold_deconv_csv (the raw deconvolution of all training samples).")
         if fold_construction_args_tunable:
             raise ToolError("prepare_celltfusion_folds doesn't support fold_construction_args_tunable; pass its arguments via fold_construction_args_fixed.")
-        for key, instead in _CELLTFUSION_FOLD_RESERVED.items():
+        for key, hint in _CELLTFUSION_FOLD_RESERVED.items():
             if key in fixed_args:
-                hint = f"pass it via {instead}" if instead else "it must be computed within each fold"
                 raise ToolError(f"'{key}' can't be set in fold_construction_args_fixed for prepare_celltfusion_folds: {hint}.")
         if fixed_args.get("TF.collection") == "ARACNE":
             raise ToolError("TF.collection='ARACNE' isn't supported by train_ml_model's prepare_celltfusion_folds; use CollecTRI or Dorothea.")
-        if fixed_args.get("batch") and not (fold_coldata_csv and fixed_args.get("batch_id")):
-            raise ToolError("\"batch\": true needs fold_coldata_csv and a \"batch_id\" column name in fold_construction_args_fixed.")
+        if bool(fold_coldata_csv) != bool(fold_batch_column):
+            raise ToolError("Multi-cohort mode needs both fold_coldata_csv and fold_batch_column (the column with each sample's cohort).")
         samples = {"align_to": features_train_csv, "align_to_columns": features_as_rows}
         fixed_args["deconv"] = csv_arg(fold_deconv_csv, row_names=1, **samples)
         # Original gene symbols (pipeML's make.names() would turn e.g. HLA-A into HLA.A), genes x samples
-        fixed_args["raw.counts"] = csv_arg(features_train_csv, row_names=1, as_matrix=True, transpose=not features_as_rows)
-        if fold_coldata_csv:
-            fixed_args["coldata"] = csv_arg(fold_coldata_csv, row_names=1, **samples)
+        fixed_args["raw_counts"] = csv_arg(features_train_csv, row_names=1, as_matrix=True, transpose=not features_as_rows)
+        if fold_batch_column:
+            fixed_args["batch"] = csv_column_arg(fold_coldata_csv, fold_batch_column, as_character=True, **samples)
 
     # pipeML warns whenever metric is set for survival (which is always selected by C-index)
     if task_type == "survival":
@@ -456,10 +480,10 @@ async def predict_ml_model(
                 "(deconv_res_rds = this training run's Custom_output written to its own .rds, "
                 "deconvolution_test_csv = this test cohort's raw deconvolution matrix) and pass "
                 "its result.csv here instead of a raw deconvolution/counts matrix; for "
-                "prepare_celltfusion_folds, run CellTFusion-server's project_celltfusion_factors "
+                "prepare_celltfusion_folds, run CellTFusion-server's score_celltfusion_test_set "
                 "(model_rds = the training run's result.rds, deconvolution_test_csv = this test "
                 "cohort's raw deconvolution matrix, with the same methods/signatures as "
-                "fold_deconv_csv) and pass its result.csv here."
+                "fold_deconv_csv) and pass its result.csv (cell group scores) here."
             )
         ),
     ],

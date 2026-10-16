@@ -56,7 +56,8 @@ servers: `csv_column_arg`/`csv_arg` take `align_to` (+ `align_to_columns` for a
 genes x samples CSV) to follow another CSV's sample IDs, `csv_arg` can also
 `transpose` and append `add_columns`, and `named_args_arg` values may be nested
 specs (e.g. a `csv_arg` for a data-valued fold-function argument). `_run`'s
-cross-session check walks nested specs too.
+cross-session check walks nested specs too. `rds_element_arg` takes a list of
+names to reach a nested element (e.g. `["Custom_output", "Cell_groups"]`).
 
 ### Server file template
 
@@ -123,17 +124,19 @@ multideconv 0.2.0 -- the removed `seed` argument and `.Iteration.<n>`
 subgroup names -- was fixed in CellTFusion `24f8c69`, which now requires
 `multideconv (>= 0.2.0)`.)
 
-### Upstream API as of the last sync (2026-10-03)
+### Upstream API as of the last sync (2026-10-16)
 
-Synced against pipeML `e727861` **plus its uncommitted working-tree edits** of
-`R/machine_learning.R`, `R/data.R` and `DESCRIPTION` (input validation,
-`preprocess`, `n_groups`, guarded parallelism), multideconv `628ef5b` (0.2.0 +
-`aggregate_cell_groups`), CellTFusion `24f8c69`, RaCInG `fef8ff0` **plus its uncommitted working-tree
-edit** of `R/RaCInG_input_generation.R` (subgroup-aware expression profiles), and
-BioinfoTools `2b0a0e2` (README-only since the installed `5be0c79`, so not
-reinstalled). The others were reinstalled with `R CMD INSTALL
-/home/marcelo.hurtado/Documents/<repo>` (repos: `pipeML`, `multideconv`,
-`CellTFusion`, `RaCInG_package`, `Bioinfo-tools`). Things the servers
+Synced against pipeML `a268a7f`, multideconv `628ef5b` (0.2.0 +
+`aggregate_cell_groups`), CellTFusion `a2ed3ff` (a function-by-function API
+rewrite; meta-program/TME mapping and the GSEA step removed), RaCInG `fef8ff0`
+**plus its uncommitted working-tree edit** of `R/RaCInG_input_generation.R`
+(subgroup-aware expression profiles), and BioinfoTools `2b0a0e2` **plus its
+uncommitted edit** of `R/survival-analysis.R` (`p_adjust`, `Statistics`).
+Reinstall with `R CMD INSTALL /home/marcelo.hurtado/Documents/<repo>` (repos:
+`pipeML`, `multideconv`, `CellTFusion`, `RaCInG_package`, `Bioinfo-tools`).
+With uncommitted upstream edits, compare the installed namespace with the
+source function by function (formals + bodies) to see what is new since the
+last install -- git only diffs against the last commit. Things the servers
 depend on:
 
 - `pipeML::compute_shap_values(model_trained, task_type, seed)` explains
@@ -187,27 +190,47 @@ depend on:
   `data`'s `target` or `time`+`event` columns; `time_var`/`event_var`/
   `trait.positive` were removed (and from `prepare_deconvolution_folds`).
   CBSX requested without credentials warns and is skipped in multideconv.
-- `CellTFusion()`: default `deconv_methods` no longer includes CBSX (and it
-  still *stops* without credentials -- the tool rejects that up front);
-  `cancer_type` is one of blca/luad/skcm or NULL (mapping skipped);
-  `batch = TRUE` needs coldata + batch_id; ARACNE networks are read from
-  `input/ARACNE/<cancer_type>/network/network.txt` relative to the run dir,
-  so `run_celltfusion` copies `aracne_network_file` there via
-  `common/tools.py:resolve_output_dir` (also used by `run_deconvolution`).
+- CellTFusion (`a2ed3ff`) renamed most arguments to snake_case
+  (`raw_counts`, `cbsx_mail`/`cbsx_token`, `min_module_size`, `file_name`,
+  `counts_norm`...), takes `batch` as the cohort vector itself (no
+  `coldata`/`batch_id`; the servers send `csv_column_arg(...,
+  as_character=True)` from a metadata CSV + column), and gained `method`
+  (decoupleR statistic, default `ulm`), `do_parallel`/`workers`, `soft_power`,
+  `consensus_quantile`, `clustering_method`, `padj`, `min_cluster_size`,
+  `compute_factors`, `top_n` and `seed`. `min_targets_size`/`min_module_size`
+  default to 5. CBSX is in the default `deconv_methods` and is *skipped* (not
+  an error) without credentials -- `run_celltfusion` still rejects that up
+  front, by the user's choice, so the user decides about CBSX. The TCGA
+  meta-program / TME mapping is gone (`TME_states`, `Metaprograms_reference`,
+  `map_factors_to_*`, `project_test_factors` removed; `enrich_thresh`/
+  `quantile_cutoff` replaced by `top_n`); `cancer_type` only names the
+  ARACNE folder (`input/ARACNE/<cancer_type>/network/network.txt`, relative to
+  the run dir, which `run_celltfusion` stages from `aracne_network_file`; a
+  `mor` column is optional). Output: 8 elements; `Cell_groups` is a named list
+  (`Cell_groups` scores, `Composition`, `Weights`).
 - `CellTFusion::prepare_celltfusion_folds(data, folds, bestune, deconv,
-  raw.counts, coldata, batch, batch_id, ncores, return, verbose, ...)` is the
-  second pipeML fold function (`train_ml_model`'s `_FOLD_FUNCTION_PACKAGES`
-  maps each registered name to its package). It needs `deconv` (and
-  `raw.counts`/`coldata`) as data, which `train_ml_model` injects into
+  raw_counts, batch, do_parallel, workers, return, verbose, ...)` is the
+  second pipeML fold function (`train_ml_model`'s `_FOLD_FUNCTION_PACKAGES`).
+  Models are trained on the **cell group scores**, not the latent factors
+  (computed only on all samples, to characterize the final model). It needs
+  `deconv`/`raw_counts`/`batch` as data, which `train_ml_model` injects into
   `fold_construction_args_fixed` from `fold_deconv_csv`/`features_train_csv`/
-  `fold_coldata_csv`; `features_as_rows=True` takes the usual genes x samples
-  counts CSV. No tunable args, no `dt`/`tfs`/`pathways`, no ARACNE (all
-  rejected up front). CellTFusion-server exposes it standalone
-  (`prepare_celltfusion_folds`, outcome appended via `add_columns`) and
-  `project_test_factors` as `project_celltfusion_factors` (from a
-  train_ml_model result's `Custom_output`, or a run_celltfusion result) --
-  the projection a test cohort needs before `predict_ml_model`. Each fold is a
-  full CellTFusion run, hence the 8 h timeout for custom-fold training.
+  `fold_coldata_csv` + `fold_batch_column`; `_CELLTFUSION_FOLD_RESERVED`
+  rejects those keys and CellTFusion's old argument names up front with a
+  hint. No tunable args, no `dt`/`tfs`/`pathways`, no ARACNE. A held-out
+  cohort goes through `score_celltfusion_test_set` (`compute.test.set(dt,
+  cell_groups, group_names, deconv_test)`, fed from a train_ml_model result's
+  `Custom_output` or a run_celltfusion result) before `predict_ml_model`;
+  `project_celltfusion_factors` (`project_factors(latent_factors, scores)`)
+  places those scores on the latent factors, for characterization only.
+  CellTFusion-server exposes the fold function standalone
+  (`prepare_celltfusion_folds`, outcome appended via `add_columns`). Each fold
+  is a full CellTFusion run, hence the 8 h timeout for custom-fold training.
+- BioinfoTools `compute.survival.analysis()` gained `p_adjust`; with
+  `features` it now returns the significant formulas plus a `Statistics`
+  table of every feature (only `Statistics` when none is significant), and
+  needs the feature rows in `survival.data`'s sample order (the server aligns
+  them with `align_to`).
 - RaCInG exports `computeLRContributions`/`computeWedgeLRContributions`/
   `computeTriangleLRContributions` (wrapped as `explain_lr_contributions`,
   fed from `prepare_racing_inputs`' result.rds). `compute_racing_kernel`/

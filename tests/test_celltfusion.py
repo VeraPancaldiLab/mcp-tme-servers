@@ -40,7 +40,6 @@ async def test_run_celltfusion_and_session_lifecycle(client: Client) -> None:
             "deconv_methods": ["Epidish"],
             "min_targets_size": 5,
             "min_module_size": 5,
-            "cancer_type": "skcm",
             "verbose": False,
             "session_id": sid,
         },
@@ -50,6 +49,9 @@ async def test_run_celltfusion_and_session_lifecycle(client: Client) -> None:
     assert "TFs_matrix" in sc["summary"]["names"]
     assert "TFs_matrix" in sc["field_glossary"]
     assert sc["session_id"] == sid
+    # CellTFusion no longer maps factors onto TCGA meta-programs: 8 elements
+    assert set(sc["summary"]["names"]) == set(sc["field_glossary"])
+    assert "TME_states" not in sc["summary"]["names"] and "Latent_spaces" in sc["summary"]["names"]
 
     status = await client.call_tool("get_session_status", {"session_id": sid})
     assert status.structured_content["export_ready"] is True
@@ -59,10 +61,14 @@ async def test_run_celltfusion_and_session_lifecycle(client: Client) -> None:
 async def test_input_validation_is_upfront(client: Client) -> None:
     counts = str(DATA / "celltfusion_raw_counts_small.csv")
     cases = [
-        ({"batch": True}, "batch=True needs coldata_csv"),
+        ({"batch_column": "cohort"}, "batch_column needs coldata_csv"),
+        ({}, "cbsx_mail/cbsx_token"),  # CBSX is in the default deconv_methods
         ({"deconv_methods": ["Epidish", "CBSX"]}, "cbsx_mail/cbsx_token"),
-        ({"tf_collection": "ARACNE"}, "needs aracne_network_file"),
-        ({"tf_collection": "ARACNE", "aracne_network_file": str(DATA / "missing_network.txt")}, "not found"),
+        ({"deconv_methods": ["Epidish"], "tf_collection": "ARACNE"}, "needs aracne_network_file"),
+        (
+            {"deconv_methods": ["Epidish"], "tf_collection": "ARACNE", "aracne_network_file": str(DATA / "missing_network.txt")},
+            "not found",
+        ),
     ]
     for extra, message in cases:
         result = await client.call_tool("run_celltfusion", {"raw_counts_csv": counts, **extra})
@@ -71,20 +77,8 @@ async def test_input_validation_is_upfront(client: Client) -> None:
 
 
 @pytest.mark.anyio
-async def test_unsupported_cancer_type_is_rejected(client: Client) -> None:
-    # Only cancer types with a bundled TCGA meta-program reference are accepted.
-    try:
-        result = await client.call_tool(
-            "run_celltfusion", {"raw_counts_csv": str(DATA / "celltfusion_raw_counts_small.csv"), "cancer_type": "brca"}
-        )
-    except Exception:
-        return
-    assert result.is_error
-
-
-@pytest.mark.anyio
 async def test_prepare_celltfusion_folds_per_fold(client: Client) -> None:
-    # One fold: CellTFusion learns the latent factors on 16 training samples and projects the other 8.
+    # One fold: CellTFusion learns the cell groups on 16 training samples and scores the other 8.
     result = await client.call_tool(
         "prepare_celltfusion_folds",
         {
@@ -117,19 +111,21 @@ async def test_prepare_celltfusion_folds_validation(client: Client) -> None:
         ({"target_column": "target", "time_column": "time"}, "either target_column"),
         ({"time_column": "time"}, "both time_column and event_column"),
         ({"target_column": "target", "compute_full_dataset": False}, "folds is required"),
-        ({"target_column": "target", "batch": True}, "batch=True needs coldata_csv"),
+        ({"target_column": "target", "batch_column": "cohort"}, "batch_column needs coldata_csv"),
     ]
     for extra, message in cases:
         result = await client.call_tool("prepare_celltfusion_folds", {**base, **extra})
         assert result.is_error, extra
         assert message in result.content[0].text, (extra, result.content[0].text)
 
-    for extra in ({}, {"model_rds": "a.rds", "celltfusion_rds": "b.rds"}):
-        result = await client.call_tool(
-            "project_celltfusion_factors", {"deconvolution_test_csv": base["deconvolution_csv"], **extra}
-        )
-        assert result.is_error
-        assert "exactly one of model_rds" in result.content[0].text
+    for tool, data in (
+        ("score_celltfusion_test_set", {"deconvolution_test_csv": base["deconvolution_csv"]}),
+        ("project_celltfusion_factors", {"scores_csv": base["deconvolution_csv"]}),
+    ):
+        for extra in ({}, {"model_rds": "a.rds", "celltfusion_rds": "b.rds"}):
+            result = await client.call_tool(tool, {**data, **extra})
+            assert result.is_error, (tool, extra)
+            assert "exactly one of model_rds" in result.content[0].text
 
 
 @pytest.mark.anyio
@@ -154,4 +150,19 @@ async def test_run_celltfusion_with_precomputed_subgroups(client: Client) -> Non
     assert not result.is_error, result.content[0].text
     sc = result.structured_content
     assert "Latent_spaces" in sc["summary"]["names"]
-    assert sc["summary"]["elements"]["TME_states"]["class"] == "NULL"  # no cancer_type -> mapping skipped
+    celltfusion_rds = str(Path(sc["run_dir"]) / "result.rds")
+
+    # A new cohort (here the same samples) scored on these cell groups, then placed on the factors
+    scored = await client.call_tool(
+        "score_celltfusion_test_set",
+        {"celltfusion_rds": celltfusion_rds, "deconvolution_test_csv": str(DATA / "celltfusion_deconv_small.csv")},
+    )
+    assert not scored.is_error, scored.content[0].text
+    ssc = scored.structured_content
+    assert ssc["summary"]["dim"][0] == 24
+    projected = await client.call_tool(
+        "project_celltfusion_factors",
+        {"celltfusion_rds": celltfusion_rds, "scores_csv": str(Path(ssc["run_dir"]) / ssc["csv_outputs"]["result"])},
+    )
+    assert not projected.is_error, projected.content[0].text
+    assert projected.structured_content["summary"]["dim"][0] == 24
