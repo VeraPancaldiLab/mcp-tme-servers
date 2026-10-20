@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                          # install/update Python deps
-uv run pytest                                    # full suite -- runs real R subprocesses, not mocked
+MCP_TME_RSCRIPT=/opt/R/4.3.3/bin/Rscript uv run pytest   # full suite -- runs real R subprocesses, not mocked
 uv run pytest tests/test_multideconv.py          # one server's tests
 uv run pytest tests/test_multideconv.py::test_analyze_deconvolution -v   # one test
 
@@ -20,7 +20,16 @@ uv run --with pyflakes python -m pyflakes src/mcp_tme_servers   # no configured 
 Rscript -e 'invisible(parse("src/mcp_tme_servers/common/r/run_tool.R"))'  # syntax-check the shared R dispatcher after editing it
 ```
 
-Tests require R on `PATH` with the five underlying packages installed (see
+The R that runs every tool is `MCP_TME_RSCRIPT` when set, else `Rscript` on `PATH`
+(`common/r_bridge.py:rscript()`). On this machine PATH's R is 4.3.1 (system-wide,
+root-owned `/opt/R/current` symlink -- don't repoint it) but CellTFusion requires
+R >= 4.3.3, so the five user-scope MCP server entries in `~/.claude.json` carry
+`MCP_TME_RSCRIPT=/opt/R/4.3.3/bin/Rscript`, and tests/installs must use 4.3.3 too
+(`/opt/R/4.3.3/bin/R CMD INSTALL ...`). Both 4.3.x versions share the user library
+`~/R/x86_64-pc-linux-gnu-library/4.3`, so other packages need no reinstall; but a
+CellTFusion built for >= 4.3.3 no longer loads in plain 4.3.1 R.
+
+Tests require that R with the five underlying packages installed (see
 "R package auto-install" below) -- they exercise the real `mcp.Client` against
 each server's in-process `mcp` object and shell out to actual R, so they're
 slower than typical unit tests and will install a missing package on first
@@ -124,13 +133,12 @@ multideconv 0.2.0 -- the removed `seed` argument and `.Iteration.<n>`
 subgroup names -- was fixed in CellTFusion `24f8c69`, which now requires
 `multideconv (>= 0.2.0)`.)
 
-### Upstream API as of the last sync (2026-10-16)
+### Upstream API as of the last sync (2026-10-20)
 
-Synced against pipeML `a268a7f`, multideconv `628ef5b` (0.2.0 +
-`aggregate_cell_groups`), CellTFusion `a2ed3ff` (a function-by-function API
-rewrite; meta-program/TME mapping and the GSEA step removed), RaCInG `fef8ff0`
-**plus its uncommitted working-tree edit** of `R/RaCInG_input_generation.R`
-(subgroup-aware expression profiles), and BioinfoTools `2b0a0e2` **plus its
+Synced against pipeML `52f6583`, multideconv `c23e11a` (0.2.0 +
+`aggregate_cell_groups`), CellTFusion `adab5d2` (a function-by-function API
+rewrite; meta-program/TME mapping and the GSEA step removed; requires R >=
+4.3.3), RaCInG `8cde19f` (direct communication + GSCC only, see below), and BioinfoTools `2b0a0e2` **plus its
 uncommitted edit** of `R/survival-analysis.R` (`p_adjust`, `Statistics`).
 Reinstall with `R CMD INSTALL /home/marcelo.hurtado/Documents/<repo>` (repos:
 `pipeML`, `multideconv`, `CellTFusion`, `RaCInG_package`, `Bioinfo-tools`).
@@ -231,13 +239,18 @@ depend on:
   table of every feature (only `Statistics` when none is significant), and
   needs the feature rows in `survival.data`'s sample order (the server aligns
   them with `align_to`).
-- RaCInG exports `computeLRContributions`/`computeWedgeLRContributions`/
-  `computeTriangleLRContributions` (wrapped as `explain_lr_contributions`,
-  fed from `prepare_racing_inputs`' result.rds). `compute_racing_kernel`/
-  `compute_racing_montecarlo` default `output_folder` to a hardcoded
-  `~/Documents/racing/vignettes/`, so the server always passes `"Results/"`.
-  A user-supplied `deconv` is fit as ONE composition when estimating
-  expression profiles (only the internally computed one is fit per
+- RaCInG (`8cde19f`) was reduced to direct communication and GSCC: the kernel
+  method computes only `communication_type = "D"` (features `Dir_<A>_<B>`;
+  `run_racing_kernel` no longer exposes the parameter), the Monte Carlo method
+  only `"D"`/`"GSCC"`, and wedges/triangles (and `computeWedgeLRContributions`/
+  `computeTriangleLRContributions`) are gone, so `explain_lr_contributions` is
+  direct-only (`sender`/`receiver`, wrapping `computeLRContributions`). Both
+  workflows gained `already_normalized`, the Monte Carlo one `expr_threshold`;
+  `output_folder` now defaults to `"Results/"` (the server still passes it). A
+  supplied `deconv` must list exactly the counts' samples in order -- the server
+  aligns `deconv_csv` to the counts CSV's columns -- and should use multideconv's
+  cell-type nomenclature. A user-supplied `deconv` is fit as ONE composition when
+  estimating expression profiles (only the internally computed one is fit per
   method/signature block).
 
 If a package is reinstalled to a version predating these changes, these

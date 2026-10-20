@@ -11,12 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 R_RUNNER = Path(__file__).resolve().parent / "r" / "run_tool.R"
+
+# The Rscript every tool runs: MCP_TME_RSCRIPT when set (e.g. /opt/R/4.3.3/bin/Rscript, when the
+# wrapped packages need a newer R than the one on PATH), otherwise whatever `Rscript` PATH resolves.
+# Read per call, so it follows the server process's environment.
+def rscript() -> str:
+    return os.environ.get("MCP_TME_RSCRIPT") or "Rscript"
 
 _START_MARKER = "===TME_RESULT_JSON_START==="
 _END_MARKER = "===TME_RESULT_JSON_END==="
@@ -240,7 +247,7 @@ async def run_r_function(
     manifest_path.write_text(json.dumps(manifest))
 
     proc = await asyncio.create_subprocess_exec(
-        "Rscript",
+        rscript(),
         str(R_RUNNER),
         str(manifest_path),
         stdout=asyncio.subprocess.PIPE,

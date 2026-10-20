@@ -98,6 +98,18 @@ claude mcp add Bioinfo-tools-server --scope user -- uv --directory /path/to/mcp-
 machine (not just when run from inside this repo's directory). Verify with
 `claude mcp list`, or `/mcp` inside a Claude Code session.
 
+**R version.** CellTFusion requires R >= 4.3.3. The servers run whatever `Rscript` is first on
+`PATH`, unless the `MCP_TME_RSCRIPT` environment variable points to another one. If the R on
+`PATH` is older, register the servers with `-e MCP_TME_RSCRIPT=/path/to/R-4.3.3/bin/Rscript`
+(before the `--`), e.g.
+
+```bash
+claude mcp add CellTFusion-server --scope user -e MCP_TME_RSCRIPT=/opt/R/4.3.3/bin/Rscript -- uv --directory /path/to/mcp-tme-servers run mcp-celltfusion-server
+```
+
+and run the tests with the same variable (`MCP_TME_RSCRIPT=/opt/R/4.3.3/bin/Rscript uv run pytest`).
+Install the R packages with that same R (`/opt/R/4.3.3/bin/R CMD INSTALL ...`).
+
 ## What and how to ask? Here some examples
 
 - "I have RNA-seq counts from 40 tumor samples in tumor_counts.csv. Can you estimate how much of each immune and stromal cell type is present in each sample?"

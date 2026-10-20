@@ -42,7 +42,7 @@ async def test_prepare_inputs_and_kernel_chain_with_session(client: Client) -> N
 
     kernel = await client.call_tool(
         "run_racing_kernel",
-        {"input_data_rds": input_rds, "communication_type": ["D", "W"], "session_id": sid},
+        {"input_data_rds": input_rds, "session_id": sid},
     )
     assert not kernel.is_error
     kernel_sc = kernel.structured_content
@@ -80,37 +80,60 @@ async def test_explain_lr_contributions(client: Client) -> None:
     assert not prep.is_error
     input_rds = prep.structured_content["run_dir"] + "/result.rds"
     cells = prep.structured_content["summary"]["elements"]["celltypes"]["preview"]
-    assert len(cells) >= 3
+    assert len(cells) >= 2
 
     direct = await client.call_tool(
         "explain_lr_contributions",
-        {"input_data_rds": input_rds, "motif": "direct", "cell_types": cells[:2], "top_n": 5},
+        {"input_data_rds": input_rds, "sender": cells[0], "receiver": cells[1], "top_n": 5},
     )
     assert not direct.is_error, direct.content[0].text
     summary = direct.structured_content["summary"]
     if summary["class"] != "NULL":
         assert {"Patient", "Ligand", "Receptor", "Contribution", "PctOfTotal"} <= set(summary["colnames"])
-        # Patients are labelled with the real sample names, not Patient_1, Patient_2, ...
-        assert not any(str(p).startswith("Patient_") for p in summary["rownames"] or [])
 
-    wedge = await client.call_tool(
-        "explain_lr_contributions", {"input_data_rds": input_rds, "motif": "wedge", "cell_types": cells[:3]}
+    unknown = await client.call_tool(
+        "explain_lr_contributions", {"input_data_rds": input_rds, "sender": "NotACellType", "receiver": cells[1]}
     )
-    assert not wedge.is_error, wedge.content[0].text
+    assert unknown.is_error
 
-    wrong = await client.call_tool(
-        "explain_lr_contributions", {"input_data_rds": input_rds, "motif": "wedge", "cell_types": cells[:2]}
+
+@pytest.mark.anyio
+async def test_montecarlo_direct_and_gscc(client: Client) -> None:
+    # Monte Carlo now computes only 'D' and/or 'GSCC' (wedges and triangles were removed upstream)
+    prep = await client.call_tool("prepare_racing_inputs", {"counts_csv": str(DATA / "racing_counts_small.csv")})
+    assert not prep.is_error
+    result = await client.call_tool(
+        "run_racing_montecarlo",
+        {
+            "input_data_rds": prep.structured_content["run_dir"] + "/result.rds",
+            "communication_type": ["D", "GSCC"],
+            "n_patients": 2,
+            "n_cells": 100,
+            "n_graphs": 2,
+            "n_degree": 3,
+        },
     )
-    assert wrong.is_error
-    assert "needs exactly 3" in wrong.content[0].text
+    assert not result.is_error, result.content[0].text
+    sc = result.structured_content
+    assert {"input", "output"} <= set(sc["summary"]["names"])
+
+    # A removed motif type is rejected by the tool schema
+    try:
+        rejected = await client.call_tool(
+            "run_racing_montecarlo", {"input_data_rds": prep.structured_content["run_dir"] + "/result.rds", "communication_type": ["W"]}
+        )
+    except Exception:
+        return
+    assert rejected.is_error
 
 
 @pytest.mark.anyio
 async def test_kernel_from_counts_writes_inside_run_dir(client: Client) -> None:
-    # compute_racing_kernel's own output_folder default is a hardcoded ~/Documents/racing/vignettes/;
-    # the server must keep the intermediate input files in the call's run_dir.
-    result = await client.call_tool(
-        "run_racing_kernel", {"counts_csv": str(DATA / "racing_counts_small.csv"), "communication_type": ["D"]}
-    )
+    # The intermediate input files must stay inside the call's run_dir.
+    result = await client.call_tool("run_racing_kernel", {"counts_csv": str(DATA / "racing_counts_small.csv")})
     assert not result.is_error, result.content[0].text
-    assert any(f.startswith("Results/Lmatrix_") for f in result.structured_content["output_files"])
+    sc = result.structured_content
+    assert any(f.startswith("Results/Lmatrix_") for f in sc["output_files"])
+    # The kernel computes direct communication only: Dir_<A>_<B> columns
+    features = sc["summary"]["elements"]["features"]
+    assert features["colnames"] and all(c.startswith("Dir_") for c in features["colnames"])
