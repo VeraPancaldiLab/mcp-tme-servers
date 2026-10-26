@@ -23,6 +23,7 @@ from mcp_tme_servers.common.paths import server_home
 from mcp_tme_servers.common.r_bridge import args_from, csv_arg, csv_column_arg, lit, named_args_arg, rds_arg
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    SCOPE_INSTRUCTIONS,
     EXPRESSION_SCALE_INSTRUCTIONS,
     READ_ANNOTATIONS,
     OutputDir,
@@ -44,7 +45,7 @@ mcp = MCPServer(
         + 'On this server: run_deconvolution takes raw counts (normalized=True, the default) or linear TPM (normalized=False); it has no option for log-transformed input. '
         + 'IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to multideconv itself: Hurtado, M., Khajavi, L., Essabbar, A., & Pancaldi, V. (2025). multideconv -- Integrative pipeline for cell type deconvolution from bulk RNAseq using first and second generation methods. bioRxiv. https://doi.org/10.1101/2025.04.29.651220 -- plus whichever individual deconvolution methods/signatures were actually used. '
         'IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user.'
-        'IMPORTANT -- visualizing cell-type proportions: when showing cell-type composition/proportions from this server\'s output (e.g. analyze_deconvolution\'s harmonized subgroups), always plot every subgroup per cell type as its own bar -- never average or collapse subgroups within a cell type into a single value/bar. A cell type\'s subgroups (different method/signature combinations judged to agree) can still legitimately differ in their exact proportion estimates, and averaging them away hides that heterogeneity, which is itself informative (e.g. about how much the surviving methods/signatures actually agree on the number, not just the direction). Bar plots are the right chart for this -- one bar per subgroup, grouped/faceted by cell type (and by sample/patient when comparing across samples) -- so the spread across subgroups stays visible rather than being flattened into a single summary bar.'
+        + SCOPE_INSTRUCTIONS
     ),
 )
 

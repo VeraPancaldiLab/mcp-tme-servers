@@ -18,6 +18,13 @@ on your behalf, using the [Model Context Protocol](https://modelcontextprotocol.
 
 - Python >= 3.12.
 - MCP Python SDK 2.x, installed automatically with this package.
+- R >= 4.3.3 (CellTFusion), see "R version" below.
+- RaCInG >= 0.3.1: its deconvolution uses multideconv's default set of methods (Quantiseq,
+  EpiDISH, DeconRNASeq, DWLS and CIBERSORTx), as multideconv and CellTFusion do. An older
+  installed RaCInG is not updated automatically: reinstall it.
+- For CIBERSORTx (in the default methods of multideconv, CellTFusion and RaCInG): Docker, which
+  multideconv uses to run it, and a free CIBERSORTx account (email and API token). Without them,
+  remove CBSX from the methods.
 
 **Recommended:** run this from a dedicated conda/mamba environment with its
 own R, to avoid version conflicts with other projects. 

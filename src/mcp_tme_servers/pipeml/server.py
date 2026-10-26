@@ -24,6 +24,7 @@ from mcp_tme_servers.common.paths import server_home
 from mcp_tme_servers.common.r_bridge import args_from, csv_arg, csv_column_arg, lit, named_args_arg, named_r_function_arg, rds_element_arg
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    SCOPE_INSTRUCTIONS,
     READ_ANNOTATIONS,
     OutputDir,
     RunResult,
@@ -40,6 +41,7 @@ mcp = MCPServer(
         "Tools for leakage-free classification/survival modeling on precomputed feature tables (typically cell-type deconvolution, TF-module, or network features from this package's multideconv, CellTFusion, or RaCInG servers). Pipeline: train_ml_model (train + cross-validate) -> predict_ml_model (score a held-out test set) -> optionally compute_shap_values (per-feature importance). Both classification (AUROC/AUPRC) and survival (C-index, Kaplan-Meier) tasks are supported, with repeated k-fold, leave-one-dataset-out (LODO), or custom per-fold feature recomputation (fold_construction_fun) for cohort-dependent features. "
         "IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to pipeML itself: Hurtado, M., & Pancaldi, V. (2026). A new pipeline for cross-validation fold-aware machine learning prediction of clinical outcomes addresses hidden data-leakage in omics based 'predictors'. bioRxiv. https://doi.org/10.64898/2026.03.12.711429 -- plus whichever specific ML algorithms it selected were actually used. "
         "IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user."
+        + SCOPE_INSTRUCTIONS
     ),
 )
 

@@ -228,6 +228,17 @@ for (sister_pkg in names(sister_install_cmds)) {
   suppressMessages(library(sister_pkg, character.only = TRUE))
 }
 
+# Oldest versions with the arguments and defaults the servers rely on. An older installed copy
+# is not updated automatically (ensure_installed only installs a missing package), so stop
+# with a clear message instead of an "unused argument" error further on.
+min_versions <- c(RaCInG = "0.3.1")
+for (pkg in names(min_versions)) {
+  if (utils::packageVersion(pkg) < min_versions[[pkg]]) {
+    stop(pkg, " >= ", min_versions[[pkg]], " is needed (installed: ", as.character(utils::packageVersion(pkg)),
+         "): reinstall it, e.g. ", deparse(body(sister_install_cmds[[pkg]])), call. = FALSE)
+  }
+}
+
 # BioinfoTools is a standalone package -- none of the above call into it, nor
 # it into them -- so it's only installed/attached when it's actually this
 # call's target, rather than unconditionally like the four above.

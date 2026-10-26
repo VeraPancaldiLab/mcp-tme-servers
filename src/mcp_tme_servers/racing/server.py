@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from mcp_tme_servers.common.paths import server_home
@@ -28,6 +29,7 @@ from mcp_tme_servers.common.r_bridge import (
 )
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    SCOPE_INSTRUCTIONS,
     EXPRESSION_SCALE_INSTRUCTIONS,
     NETWORK_ANNOTATIONS,
     OutputDir,
@@ -44,10 +46,12 @@ mcp = MCPServer(
     instructions=(
         'Tools for reconstructing patient-specific cell-cell communication networks from bulk RNAseq and extracting communication features from them. Pipeline order: prepare_racing_inputs once, then reuse its result via input_data_rds in run_racing_kernel and/or run_racing_montecarlo (skips recomputing preprocessing). Prefer the kernel method as the default -- it is fast and deterministic; use the Monte Carlo method specifically when you want simulation-based variance/robustness across randomly realized network instances rather than a single point estimate, at a much higher compute cost. To see which ligand-receptor pairs drive a given direct feature, call explain_lr_contributions on the same input_data_rds. Feature families, from a directed graph built on cell-type abundance and ligand-receptor expression: direct signaling between two cell types (D; both methods, columns Dir_<A>_<B>) and overall network integration (GSCC; Monte Carlo only). Wedges and triangles were removed from RaCInG. '
         "IMPORTANT -- check for existing inputs before recomputing: prepare_racing_inputs/run_racing_kernel/run_racing_montecarlo can each internally recompute cell-type abundance (deconvolution) rather than needing it precomputed. Before calling any of them, proactively check whether a deconvolution/cell-type abundance result already exists for this same cohort -- e.g. from a prior multideconv-server run_deconvolution/analyze_deconvolution call, or an earlier RaCInG-server session on this same input data. Look for it via that server's get_session_status/prior sessions, or by asking the user whether they already have one. If you locate a candidate, do not pass it in silently -- ask the user to confirm it's the right one for this cohort before using it via deconv_csv (or input_data_rds, which also carries it). If the user doesn't confirm it (or none is found), let deconv_method compute it internally from scratch rather than guessing. "
+        "IMPORTANT -- deconvolution methods and CBSX: when prepare_racing_inputs/run_racing_kernel/run_racing_montecarlo compute the deconvolution themselves (no deconv_csv/input_data_rds), they use multideconv's default set of methods by default -- Quantiseq, EpiDISH, DeconRNASeq, DWLS and CIBERSORTx (CBSX), each with all its signatures -- combined into cell subgroups, as RaCInG does; each subgroup or remaining feature is one cell type of the networks (often more than a hundred). CBSX needs a CIBERSORTx account (cbsx_name + cbsx_token) that nothing in this pipeline can supply on its own: before calling with CBSX included, ask the user for their CIBERSORTx email and API token (free registration at https://cibersortx.stanford.edu). If they have them, pass them and keep CBSX. If they don't, tell them the two options -- run now without CBSX (remove it from deconv_method), or wait until they have the credentials -- and let them choose. Don't drop CBSX silently and don't call without asking: the call is rejected up front without the credentials. With that many cell types the Monte Carlo method needs much more time and memory than with a single method; use the kernel method first, and start Monte Carlo with a small n_graphs. "
         + EXPRESSION_SCALE_INSTRUCTIONS
         + 'On this server: prepare_racing_inputs, run_racing_kernel and run_racing_montecarlo take raw counts (already_normalized=False, the default) or linear TPM (already_normalized=True); their internal deconvolution and expression threshold both work on linear TPM, so never give them log-transformed values. '
         + 'IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to RaCInG itself: van Santvoort M, Lapuente-Santana Ó, Zopoglou M, Zackl C, Finotello F, van der Hoorn P & Eduati F (2025). Mathematically mapping the network of cells in the tumor microenvironment. Cell Reports Methods, 5(2), 100985. '
         'IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user.'
+        + SCOPE_INSTRUCTIONS
     ),
 )
 
@@ -119,7 +123,7 @@ _MC_GLOSSARY = {
 _DECONV_CSV_DOC = (
     "Optional precomputed patient x cell-type abundance CSV, matched to the counts' samples by "
     "sample ID (its rows must cover exactly those samples). Computed internally if omitted -- via "
-    "multideconv's deconvolution plus subgroup analysis (columns keep multideconv's names, e.g. "
+    "multideconv's deconvolution (deconv_method, by default several methods and signatures) plus subgroup analysis (columns keep multideconv's names, e.g. "
     "B.cells_Subgroup.1 or Quantiseq_TIL10_B.cells), with each cell type's expression profile "
     "fitted per method/signature block and then merged, which is the most rigorous path. A supplied "
     "matrix should use multideconv's cell-type nomenclature in its column names (RaCInG warns "
@@ -138,6 +142,32 @@ _ALREADY_NORMALIZED_DOC = (
     "log-scale value compared against it would silently apply the wrong cutoff. Only used when "
     "computing inputs from counts_csv."
 )
+
+# multideconv's default set of methods (as multideconv-server's run_deconvolution and RaCInG itself)
+_DECONV_METHODS = ["Quantiseq", "Epidish", "DeconRNASeq", "DWLS", "CBSX"]
+
+_DECONV_METHOD_DOC = (
+    "Deconvolution methods used internally when deconv_csv is not supplied. Default: multideconv's "
+    "default set (Quantiseq, EpiDISH, DeconRNASeq, DWLS and CIBERSORTx/CBSX, each with all its "
+    "signatures), whose estimates are combined into cell subgroups -- each subgroup or remaining "
+    "feature is one cell type of the networks. CBSX needs cbsx_name + cbsx_token and the call is "
+    "rejected without them: ask the user for them before calling, and remove 'CBSX' only if the user "
+    "chooses to run without it. A single method (e.g. ['Quantiseq']) gives far fewer cell types and "
+    "runs much faster."
+)
+_CBSX_NAME_DOC = "CIBERSORTx account email, required (with cbsx_token) when 'CBSX' is in deconv_method (it is by default) and the deconvolution is computed here. Register for free at https://cibersortx.stanford.edu if the user doesn't already have an account."
+_CBSX_TOKEN_DOC = "CIBERSORTx API token, required (with cbsx_name) when 'CBSX' is in deconv_method (it is by default) and the deconvolution is computed here. Get it from the account's settings at https://cibersortx.stanford.edu."
+
+
+def _check_cbsx(deconv_method: list[str], cbsx_name: str | None, cbsx_token: str | None, precomputed: str | None) -> None:
+    """Reject a call that would run CIBERSORTx without credentials, before anything is computed."""
+    if "CBSX" in deconv_method and not precomputed and not (cbsx_name and cbsx_token):
+        raise ToolError(
+            "'CBSX' is in deconv_method (it is by default) but cbsx_name/cbsx_token weren't given. "
+            "Ask the user for their CIBERSORTx email and token; remove 'CBSX' from deconv_method only "
+            "if the user chooses to run without CIBERSORTx."
+        )
+
 
 _INPUT_GLOSSARY = {
     "Lmatrix": "Cell type x ligand matrix: estimated ligand expression per cell type.",
@@ -172,7 +202,9 @@ async def prepare_racing_inputs(
     fun_lr: Annotated[Literal["min", "prod"], Field(description="How to combine a ligand's and a receptor's expression into one interaction strength. 'min' (default): the weaker-expressed partner limits the interaction -- a biologically conservative choice, since signaling needs both sides present. 'prod': the product of both -- rewards pairs where both are highly expressed, more sensitive to either partner's magnitude.")] = "min",
     source_column: Annotated[str, Field(description="Ligand identifier column name in cc_network_csv.")] = "source_genesymbol",
     target_column: Annotated[str, Field(description="Receptor identifier column name in cc_network_csv.")] = "target_genesymbol",
-    deconv_method: Annotated[list[str], Field(description="Deconvolution method(s) used internally when deconv_csv is not supplied.")] = ["Quantiseq"],
+    deconv_method: Annotated[list[str], Field(description=_DECONV_METHOD_DOC)] = _DECONV_METHODS,
+    cbsx_name: Annotated[str | None, Field(description=_CBSX_NAME_DOC)] = None,
+    cbsx_token: Annotated[str | None, Field(description=_CBSX_TOKEN_DOC)] = None,
     file_name: Annotated[str | None, Field(description="File stem for the generated L/R/C/LR CSV files.")] = None,
     signed: Annotated[bool, Field(description="Also try to load an activating/inhibitory sign matrix from the output folder, if available.")] = False,
     already_normalized: Annotated[bool, Field(description=_ALREADY_NORMALIZED_DOC)] = False,
@@ -196,6 +228,7 @@ async def prepare_racing_inputs(
     OmniPath over the network and caches it indefinitely; later calls reuse the cache without a
     network round-trip.
     """
+    _check_cbsx(deconv_method, cbsx_name, cbsx_token, deconv_csv)
     args = args_from(
         **{
             "counts": csv_arg(counts_csv, row_names=1, as_matrix=True),
@@ -206,6 +239,8 @@ async def prepare_racing_inputs(
             "source": lit(source_column),
             "target": lit(target_column),
             "deconv_method": lit(deconv_method),
+            "cbsx.name": lit(cbsx_name) if cbsx_name else None,
+            "cbsx.token": lit(cbsx_token) if cbsx_token else None,
             "file_name": lit(file_name) if file_name else None,
             "signed": lit(signed),
             "already_normalized": lit(already_normalized),
@@ -214,7 +249,7 @@ async def prepare_racing_inputs(
     )
     return await _run(
         package="RaCInG", function="prepare_input_files", args=args, tool_name="prepare_racing_inputs",
-        ctx=ctx, timeout=900, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
+        ctx=ctx, timeout=28800, output_dir=output_dir, session_id=session_id, session_config=SESSION_CONFIG,
         glossary=_INPUT_GLOSSARY,
     )
 
@@ -231,7 +266,9 @@ async def run_racing_kernel(
     fun_lr: Annotated[Literal["min", "prod"], Field(description="How to combine ligand/receptor expression into interaction strength; only used when computing inputs from counts_csv.")] = "min",
     source_column: str = "source_genesymbol",
     target_column: str = "target_genesymbol",
-    deconv_method: list[str] = ["Quantiseq"],
+    deconv_method: Annotated[list[str], Field(description=_DECONV_METHOD_DOC + " Ignored if input_data_rds is given.")] = _DECONV_METHODS,
+    cbsx_name: Annotated[str | None, Field(description=_CBSX_NAME_DOC)] = None,
+    cbsx_token: Annotated[str | None, Field(description=_CBSX_TOKEN_DOC)] = None,
     file_name: Annotated[str | None, Field(description="File stem for intermediate input files.")] = None,
     n_patients: Annotated[str | int, Field(description="Number of patients to process, or 'all'.")] = "all",
     norm: Annotated[bool, Field(description="Also compute a normalized baseline kernel and express features as an enrichment ratio over it, isolating communication specificity from raw abundance/topology (see field_glossary's kernel_norm). Default False returns the raw, abundance-weighted magnitude.")] = False,
@@ -266,6 +303,7 @@ async def run_racing_kernel(
     Returns a list with the kernel array(s) and the direct communication feature matrix (see
     field_glossary).
     """
+    _check_cbsx(deconv_method, cbsx_name, cbsx_token, deconv_csv or input_data_rds)
     args = args_from(
         **{
             "counts": csv_arg(counts_csv, row_names=1, as_matrix=True) if (counts_csv and not input_data_rds) else None,
@@ -279,6 +317,8 @@ async def run_racing_kernel(
             "target": lit(target_column),
             "signed": lit(signed),
             "deconv_method": lit(deconv_method),
+            "cbsx.name": lit(cbsx_name) if cbsx_name else None,
+            "cbsx.token": lit(cbsx_token) if cbsx_token else None,
             "file_name": lit(file_name) if file_name else None,
             "nPatients": lit(n_patients),
             "communication_type": lit("D"),
@@ -309,7 +349,9 @@ async def run_racing_montecarlo(
     fun_lr: Literal["min", "prod"] = "min",
     source_column: str = "source_genesymbol",
     target_column: str = "target_genesymbol",
-    deconv_method: list[str] = ["Quantiseq"],
+    deconv_method: Annotated[list[str], Field(description=_DECONV_METHOD_DOC + " Ignored if input_data_rds is given.")] = _DECONV_METHODS,
+    cbsx_name: Annotated[str | None, Field(description=_CBSX_NAME_DOC)] = None,
+    cbsx_token: Annotated[str | None, Field(description=_CBSX_TOKEN_DOC)] = None,
     pt_idx: Annotated[int | None, Field(description="Simulate only this single patient index.")] = None,
     file_name: Annotated[str | None, Field(description="File stem for intermediate and output files.")] = None,
     n_patients: Annotated[str | int, Field(description="Number of patients to process, or 'all'.")] = "all",
@@ -350,6 +392,7 @@ async def run_racing_montecarlo(
 
     Returns a list with the inputs used and the mean/SD feature matrices (see field_glossary).
     """
+    _check_cbsx(deconv_method, cbsx_name, cbsx_token, deconv_csv or input_data_rds)
     args = args_from(
         **{
             "counts": csv_arg(counts_csv, row_names=1, as_matrix=True) if (counts_csv and not input_data_rds) else None,
@@ -362,6 +405,8 @@ async def run_racing_montecarlo(
             "target": lit(target_column),
             "signed": lit(signed),
             "deconv_method": lit(deconv_method),
+            "cbsx.name": lit(cbsx_name) if cbsx_name else None,
+            "cbsx.token": lit(cbsx_token) if cbsx_token else None,
             "pt_idx": lit(pt_idx) if pt_idx is not None else None,
             "file_name": lit(file_name) if file_name else None,
             "nPatients": lit(n_patients),

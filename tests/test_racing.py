@@ -33,7 +33,7 @@ async def test_prepare_inputs_and_kernel_chain_with_session(client: Client) -> N
 
     prep = await client.call_tool(
         "prepare_racing_inputs",
-        {"counts_csv": str(DATA / "racing_counts_small.csv"), "session_id": sid},
+        {"counts_csv": str(DATA / "racing_counts_small.csv"), "deconv_method": ["Quantiseq"], "session_id": sid},
     )
     assert not prep.is_error
     prep_sc = prep.structured_content
@@ -59,7 +59,7 @@ async def test_cross_session_chaining_is_refused(client: Client) -> None:
     sid1 = s1.structured_content["session_id"]
     prep = await client.call_tool(
         "prepare_racing_inputs",
-        {"counts_csv": str(DATA / "racing_counts_small.csv"), "session_id": sid1},
+        {"counts_csv": str(DATA / "racing_counts_small.csv"), "deconv_method": ["Quantiseq"], "session_id": sid1},
     )
     input_rds = prep.structured_content["run_dir"] + "/result.rds"
 
@@ -76,7 +76,7 @@ async def test_cross_session_chaining_is_refused(client: Client) -> None:
 
 @pytest.mark.anyio
 async def test_explain_lr_contributions(client: Client) -> None:
-    prep = await client.call_tool("prepare_racing_inputs", {"counts_csv": str(DATA / "racing_counts_small.csv")})
+    prep = await client.call_tool("prepare_racing_inputs", {"counts_csv": str(DATA / "racing_counts_small.csv"), "deconv_method": ["Quantiseq"]})
     assert not prep.is_error
     input_rds = prep.structured_content["run_dir"] + "/result.rds"
     cells = prep.structured_content["summary"]["elements"]["celltypes"]["preview"]
@@ -100,7 +100,7 @@ async def test_explain_lr_contributions(client: Client) -> None:
 @pytest.mark.anyio
 async def test_montecarlo_direct_and_gscc(client: Client) -> None:
     # Monte Carlo now computes only 'D' and/or 'GSCC' (wedges and triangles were removed upstream)
-    prep = await client.call_tool("prepare_racing_inputs", {"counts_csv": str(DATA / "racing_counts_small.csv")})
+    prep = await client.call_tool("prepare_racing_inputs", {"counts_csv": str(DATA / "racing_counts_small.csv"), "deconv_method": ["Quantiseq"]})
     assert not prep.is_error
     result = await client.call_tool(
         "run_racing_montecarlo",
@@ -130,10 +130,19 @@ async def test_montecarlo_direct_and_gscc(client: Client) -> None:
 @pytest.mark.anyio
 async def test_kernel_from_counts_writes_inside_run_dir(client: Client) -> None:
     # The intermediate input files must stay inside the call's run_dir.
-    result = await client.call_tool("run_racing_kernel", {"counts_csv": str(DATA / "racing_counts_small.csv")})
+    result = await client.call_tool("run_racing_kernel", {"counts_csv": str(DATA / "racing_counts_small.csv"), "deconv_method": ["Quantiseq"]})
     assert not result.is_error, result.content[0].text
     sc = result.structured_content
     assert any(f.startswith("Results/Lmatrix_") for f in sc["output_files"])
     # The kernel computes direct communication only: Dir_<A>_<B> columns
     features = sc["summary"]["elements"]["features"]
     assert features["colnames"] and all(c.startswith("Dir_") for c in features["colnames"])
+
+
+@pytest.mark.anyio
+async def test_cbsx_default_needs_credentials(client: Client) -> None:
+    # CIBERSORTx is in the default deconv_method: without credentials the call is rejected before running anything
+    for tool in ("prepare_racing_inputs", "run_racing_kernel", "run_racing_montecarlo"):
+        result = await client.call_tool(tool, {"counts_csv": str(DATA / "racing_counts_small.csv")})
+        assert result.is_error, tool
+        assert "cbsx_name/cbsx_token" in result.content[0].text, tool

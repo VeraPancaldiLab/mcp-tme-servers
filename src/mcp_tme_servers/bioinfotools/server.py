@@ -59,6 +59,7 @@ from mcp_tme_servers.common.r_bridge import (
 )
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    SCOPE_INSTRUCTIONS,
     EXPRESSION_SCALE_INSTRUCTIONS,
     READ_ANNOTATIONS,
     OutputDir,
@@ -124,6 +125,7 @@ mcp = MCPServer(
         "the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were "
         "saved) -- do not just use it silently to chain into the next call without also "
         "surfacing it to the user."
+        + SCOPE_INSTRUCTIONS
     ),
 )
 

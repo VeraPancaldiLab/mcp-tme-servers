@@ -31,6 +31,7 @@ from mcp_tme_servers.common.r_bridge import (
 )
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    SCOPE_INSTRUCTIONS,
     EXPRESSION_SCALE_INSTRUCTIONS,
     READ_ANNOTATIONS,
     OutputDir,
@@ -55,6 +56,7 @@ mcp = MCPServer(
         + 'On this server: run_celltfusion and prepare_celltfusion_folds take raw counts (normalized=True, the default) or linear TPM (normalized=False) and apply both rules themselves -- TPM for the internal deconvolution, log2(TPM + 1) for TF activity and pathway activity -- so never give them log-transformed values. A precomputed deconv_csv/dt_rds must also come from linear TPM, and precomputed tfs_csv/pathways_csv from log2(TPM + 1). '
         + "IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to CellTFusion itself: Hurtado, M., & Pancaldi, V. (2026). CellTFusion: A transcriptional regulatory network framework for the identification of functional multicellular states from bulk RNA-seq data. bioRxiv. https://doi.org/10.64898/2026.06.30.735682 -- plus whichever other specific R packages/methods (e.g. WGCNA, the TF-target network used) were actually used. "
         "IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user."
+        + SCOPE_INSTRUCTIONS
     ),
 )
 

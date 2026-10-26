@@ -46,6 +46,15 @@ EXPRESSION_SCALE_INSTRUCTIONS = (
     "type of normalization instead of TPM. Tell the user which scale each step received. "
 )
 
+# Rule shared by every server, appended to each server's instructions.
+SCOPE_INSTRUCTIONS = (
+    "IMPORTANT -- stay within what was asked: do exactly the analysis the user requested and nothing more. "
+    "Do not add extra analyses, tests or outputs that the user did not ask for (for example association "
+    "with response or other clinical variables, marker-gene validation, survival or statistical tests, "
+    "additional plots or extra classifications). If you think an additional analysis would help, propose it "
+    "in one sentence and wait for the user's answer before running it. "
+)
+
 
 def _redact_secrets(args: dict[str, dict]) -> dict[str, dict]:
     """Copy of `args` with any credential-looking literal value masked out.
