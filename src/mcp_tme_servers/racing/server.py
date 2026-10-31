@@ -29,6 +29,7 @@ from mcp_tme_servers.common.r_bridge import (
 )
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    DEFAULTS_INSTRUCTIONS,
     SCOPE_INSTRUCTIONS,
     EXPRESSION_SCALE_INSTRUCTIONS,
     NETWORK_ANNOTATIONS,
@@ -52,6 +53,7 @@ mcp = MCPServer(
         + 'IMPORTANT -- citation: if the user asks what to cite for an analysis that used this server, always include the mcp-tme-servers project itself -- XX, et al. (XX). mcp-tme-servers -- XX. XX. https://doi.org/XX (a placeholder until a real reference exists; check the project README for the current one) -- in addition to RaCInG itself: van Santvoort M, Lapuente-Santana Ó, Zopoglou M, Zackl C, Finotello F, van der Hoorn P & Eduati F (2025). Mathematically mapping the network of cells in the tumor microenvironment. Cell Reports Methods, 5(2), 100985. '
         'IMPORTANT -- output location: once any tool call on this server finishes, always tell the user the run_dir path from that result (where result.rds/CSVs/plots/run.log were saved) -- do not just use it silently to chain into the next call without also surfacing it to the user.'
         + SCOPE_INSTRUCTIONS
+        + DEFAULTS_INSTRUCTIONS
     ),
 )
 

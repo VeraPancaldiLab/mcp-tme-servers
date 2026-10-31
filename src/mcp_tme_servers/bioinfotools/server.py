@@ -59,6 +59,7 @@ from mcp_tme_servers.common.r_bridge import (
 )
 from mcp_tme_servers.common.session import SessionConfig
 from mcp_tme_servers.common.tools import (
+    DEFAULTS_INSTRUCTIONS,
     SCOPE_INSTRUCTIONS,
     EXPRESSION_SCALE_INSTRUCTIONS,
     READ_ANNOTATIONS,
@@ -126,6 +127,7 @@ mcp = MCPServer(
         "saved) -- do not just use it silently to chain into the next call without also "
         "surfacing it to the user."
         + SCOPE_INSTRUCTIONS
+        + DEFAULTS_INSTRUCTIONS
     ),
 )
 

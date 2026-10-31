@@ -55,6 +55,16 @@ SCOPE_INSTRUCTIONS = (
     "in one sentence and wait for the user's answer before running it. "
 )
 
+DEFAULTS_INSTRUCTIONS = (
+    "IMPORTANT -- default values: run every tool with its default parameter values unless the user "
+    "explicitly asks for specific ones. Do not change a parameter on your own initiative (for example a "
+    "threshold, the number of folds or repetitions, a seed, the list of methods or signatures, a "
+    "normalization or a filter). If you think another value would be better for this data, do not apply "
+    "it: tell the user which parameter, which value and why, and ask before deciding. Parameters that the "
+    "data itself requires (for example telling a tool whether the expression is already normalized TPM, "
+    "file paths or output folders) are not a choice and must be set correctly. "
+)
+
 
 def _redact_secrets(args: dict[str, dict]) -> dict[str, dict]:
     """Copy of `args` with any credential-looking literal value masked out.
